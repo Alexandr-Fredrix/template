@@ -1,0 +1,326 @@
+# GitLab CI/CD для INFRA репозитория
+# Деплой Helm charts в Kubernetes
+
+stages:
+  - validate
+  - plan
+  - deploy
+  - verify
+
+variables:
+  # Helm конфигурация
+  HELM_VERSION: "3.12.0"
+  HELM_EXPERIMENTAL_OCI: "1"
+
+  # Kubernetes
+  KUBERNETES_VERSION: "1.28"
+
+  # Из trigger или по умолчанию
+  ENVIRONMENT: "${ENVIRONMENT:-staging}"
+  APP_NAME: "${APP_NAME:-myapp}"
+  IMAGE_TAG: "${IMAGE_TAG:-latest}"
+
+# ========================================
+# VALIDATE STAGE - Валидация конфигураций
+# ========================================
+
+validate:helm-lint:
+  stage: validate
+  image: alpine/helm:${HELM_VERSION}
+  script:
+    # Lint Helm chart
+    - helm lint helm-charts/${APP_NAME}/
+
+    # Проверка с values файлами для каждого окружения
+    - helm lint helm-charts/${APP_NAME}/ -f helm-charts/${APP_NAME}/values-staging.yaml
+    - helm lint helm-charts/${APP_NAME}/ -f helm-charts/${APP_NAME}/values-production.yaml
+  only:
+    - merge_requests
+    - main
+
+validate:yaml:
+  stage: validate
+  image: cytopia/yamllint
+  script:
+    - yamllint -c .yamllint.yml helm-charts/
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+
+validate:kubeval:
+  stage: validate
+  image: alpine/k8s:${KUBERNETES_VERSION}
+  before_script:
+    - apk add --no-cache curl
+    - curl -sSL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
+    - mv kubeval /usr/local/bin
+  script:
+    # Генерация манифестов и проверка
+    - helm template ${APP_NAME} helm-charts/${APP_NAME}/
+        -f helm-charts/${APP_NAME}/values-${ENVIRONMENT}.yaml
+        --set image.tag=${IMAGE_TAG}
+        | kubeval --strict --ignore-missing-schemas
+  only:
+    - merge_requests
+    - main
+
+# ========================================
+# PLAN STAGE - Показать что будет изменено
+# ========================================
+
+plan:staging:
+  stage: plan
+  image: alpine/helm:${HELM_VERSION}
+  before_script:
+    - kubectl config set-cluster k8s --server="${KUBE_STAGING_URL}" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="${KUBE_STAGING_TOKEN}"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    # Показать diff
+    - helm diff upgrade ${APP_NAME} helm-charts/${APP_NAME}/
+        --namespace staging
+        --install
+        --values helm-charts/${APP_NAME}/values-staging.yaml
+        --set image.tag=${IMAGE_TAG}
+        --set environment=staging
+        || true
+  environment:
+    name: staging
+    action: prepare
+  only:
+    variables:
+      - $ENVIRONMENT == "staging"
+  when: manual
+  allow_failure: true
+
+plan:production:
+  stage: plan
+  image: alpine/helm:${HELM_VERSION}
+  before_script:
+    - kubectl config set-cluster k8s --server="${KUBE_PROD_URL}" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="${KUBE_PROD_TOKEN}"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    # Показать что будет изменено
+    - helm diff upgrade ${APP_NAME} helm-charts/${APP_NAME}/
+        --namespace production
+        --install
+        --values helm-charts/${APP_NAME}/values-production.yaml
+        --set image.tag=${IMAGE_TAG}
+        --set environment=production
+        || true
+  environment:
+    name: production
+    action: prepare
+  only:
+    variables:
+      - $ENVIRONMENT == "production"
+  when: manual
+  allow_failure: true
+
+# ========================================
+# DEPLOY STAGE - Деплой в Kubernetes
+# ========================================
+
+deploy:staging:
+  stage: deploy
+  image: alpine/helm:${HELM_VERSION}
+  before_script:
+    - kubectl config set-cluster k8s --server="${KUBE_STAGING_URL}" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="${KUBE_STAGING_TOKEN}"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    # Деплой с Helm
+    - helm upgrade --install ${APP_NAME} helm-charts/${APP_NAME}/
+        --namespace staging
+        --create-namespace
+        --values helm-charts/${APP_NAME}/values-staging.yaml
+        --set image.tag=${IMAGE_TAG}
+        --set environment=staging
+        --set triggeredBy="${TRIGGERED_BY}"
+        --wait
+        --timeout 5m
+        --atomic
+
+    # Вывод статуса
+    - helm status ${APP_NAME} -n staging
+    - kubectl get pods -n staging -l app.kubernetes.io/name=${APP_NAME}
+  environment:
+    name: staging
+    url: https://staging.example.com
+    on_stop: stop:staging
+    auto_stop_in: 1 week
+  only:
+    variables:
+      - $ENVIRONMENT == "staging"
+  when: manual
+
+deploy:production:
+  stage: deploy
+  image: alpine/helm:${HELM_VERSION}
+  before_script:
+    - kubectl config set-cluster k8s --server="${KUBE_PROD_URL}" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="${KUBE_PROD_TOKEN}"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    # Создать snapshot текущего состояния
+    - helm get values ${APP_NAME} -n production -o yaml > previous-values.yaml || true
+
+    # Деплой
+    - helm upgrade --install ${APP_NAME} helm-charts/${APP_NAME}/
+        --namespace production
+        --create-namespace
+        --values helm-charts/${APP_NAME}/values-production.yaml
+        --set image.tag=${IMAGE_TAG}
+        --set environment=production
+        --set triggeredBy="${TRIGGERED_BY}"
+        --wait
+        --timeout 10m
+        --atomic
+
+    # Вывод статуса
+    - helm status ${APP_NAME} -n production
+    - kubectl get pods -n production -l app.kubernetes.io/name=${APP_NAME}
+  artifacts:
+    paths:
+      - previous-values.yaml
+    expire_in: 30 days
+  environment:
+    name: production
+    url: https://example.com
+    on_stop: rollback:production
+  only:
+    variables:
+      - $ENVIRONMENT == "production"
+  when: manual
+
+# ========================================
+# VERIFY STAGE - Проверка после деплоя
+# ========================================
+
+verify:health-check:
+  stage: verify
+  image: curlimages/curl:latest
+  script:
+    - |
+      if [ "$ENVIRONMENT" = "staging" ]; then
+        HEALTH_URL="https://staging.example.com/health"
+      else
+        HEALTH_URL="https://example.com/health"
+      fi
+
+    # Проверка здоровья приложения
+    - |
+      for i in {1..10}; do
+        if curl -f -s -o /dev/null -w "%{http_code}" $HEALTH_URL | grep -q "200"; then
+          echo "✅ Health check passed"
+          exit 0
+        fi
+        echo "⏳ Waiting for application to be healthy... ($i/10)"
+        sleep 10
+      done
+      echo "❌ Health check failed"
+      exit 1
+  retry:
+    max: 2
+    when: script_failure
+
+verify:smoke-tests:
+  stage: verify
+  image: postman/newman:alpine
+  script:
+    # Запуск smoke тестов
+    - |
+      if [ "$ENVIRONMENT" = "staging" ]; then
+        ENV_FILE="postman-staging.json"
+      else
+        ENV_FILE="postman-production.json"
+      fi
+
+    - newman run smoke-tests/collection.json
+        --environment smoke-tests/${ENV_FILE}
+        --reporters cli,junit
+        --reporter-junit-export newman-report.xml
+  artifacts:
+    reports:
+      junit: newman-report.xml
+  allow_failure: true
+
+# ========================================
+# Rollback и Cleanup
+# ========================================
+
+rollback:production:
+  stage: deploy
+  image: alpine/helm:${HELM_VERSION}
+  before_script:
+    - kubectl config set-cluster k8s --server="${KUBE_PROD_URL}" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="${KUBE_PROD_TOKEN}"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    # Откат на предыдущую версию
+    - helm rollback ${APP_NAME} -n production
+    - echo "✅ Rolled back to previous version"
+
+    # Статус
+    - helm status ${APP_NAME} -n production
+    - kubectl get pods -n production -l app.kubernetes.io/name=${APP_NAME}
+  environment:
+    name: production
+    action: rollback
+  when: manual
+
+stop:staging:
+  stage: deploy
+  image: alpine/helm:${HELM_VERSION}
+  before_script:
+    - kubectl config set-cluster k8s --server="${KUBE_STAGING_URL}" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="${KUBE_STAGING_TOKEN}"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    - helm uninstall ${APP_NAME} -n staging
+    - echo "✅ Staging environment stopped"
+  environment:
+    name: staging
+    action: stop
+  when: manual
+
+# ========================================
+# Нотификации
+# ========================================
+
+notify:deployment:
+  stage: verify
+  image: curlimages/curl:latest
+  script:
+    - |
+      if [ "$CI_JOB_STATUS" = "success" ]; then
+        STATUS_EMOJI="✅"
+        STATUS_TEXT="successful"
+      else
+        STATUS_EMOJI="❌"
+        STATUS_TEXT="failed"
+      fi
+
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+      --data "{
+        \"text\": \"${STATUS_EMOJI} Deployment ${STATUS_TEXT}\",
+        \"blocks\": [{
+          \"type\": \"section\",
+          \"text\": {
+            \"type\": \"mrkdwn\",
+            \"text\": \"*Environment:* ${ENVIRONMENT}\n*Application:* ${APP_NAME}\n*Image Tag:* \`${IMAGE_TAG}\`\n*Triggered by:* ${TRIGGERED_BY}\n*Pipeline:* ${CI_PIPELINE_URL}\"
+          }
+        }]
+      }" \
+      ${SLACK_WEBHOOK_URL}
+  when: always
+  allow_failure: true

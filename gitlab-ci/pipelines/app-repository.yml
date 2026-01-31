@@ -1,0 +1,341 @@
+# GitLab CI/CD для APP репозитория
+# Lint → Test → Build → Push → Trigger Deploy
+
+stages:
+  - lint
+  - test
+  - build
+  - deploy-trigger
+
+variables:
+  # Docker образ
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  IMAGE_NAME: $CI_REGISTRY_IMAGE
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+
+  # Infra репозиторий для trigger
+  INFRA_PROJECT_ID: "123456"  # ID вашего infra проекта
+  INFRA_REPO_URL: "https://gitlab.com/your-group/infra-repo.git"
+
+# ========================================
+# LINT STAGE - Проверка качества кода
+# ========================================
+
+lint:eslint:
+  stage: lint
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    - npm run lint
+    - npx eslint . --format gitlab > gl-code-quality-report.json || true
+  artifacts:
+    reports:
+      codequality: gl-code-quality-report.json
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-npm
+    paths:
+      - node_modules/
+  only:
+    - merge_requests
+    - main
+    - develop
+
+lint:prettier:
+  stage: lint
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    - npx prettier --check "**/*.{js,jsx,ts,tsx,json,css,md}"
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-npm
+    paths:
+      - node_modules/
+  allow_failure: true
+  only:
+    - merge_requests
+
+lint:dockerfile:
+  stage: lint
+  image: hadolint/hadolint:latest-alpine
+  script:
+    - hadolint Dockerfile
+  allow_failure: true
+
+# ========================================
+# TEST STAGE - Тестирование
+# ========================================
+
+test:unit:
+  stage: test
+  image: node:18-alpine
+  services:
+    - postgres:15-alpine
+    - redis:7-alpine
+  variables:
+    POSTGRES_DB: test_db
+    POSTGRES_USER: test_user
+    POSTGRES_PASSWORD: test_password
+    DATABASE_URL: postgresql://test_user:test_password@postgres:5432/test_db
+    REDIS_URL: redis://redis:6379
+  before_script:
+    - npm ci
+  script:
+    - npm run test:unit -- --coverage --ci --reporters=default --reporters=jest-junit
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+    paths:
+      - coverage/
+    expire_in: 30 days
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-npm
+    paths:
+      - node_modules/
+
+test:integration:
+  stage: test
+  image: node:18-alpine
+  services:
+    - postgres:15-alpine
+    - redis:7-alpine
+  variables:
+    DATABASE_URL: postgresql://test_user:test_password@postgres:5432/test_db
+    REDIS_URL: redis://redis:6379
+  before_script:
+    - npm ci
+  script:
+    - npm run test:integration
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-npm
+    paths:
+      - node_modules/
+  only:
+    - main
+    - develop
+
+# ========================================
+# BUILD STAGE - Сборка и публикация образа
+# ========================================
+
+build:docker:
+  stage: build
+  image: docker:24-alpine
+  services:
+    - docker:24-dind
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    # Сборка образа
+    - docker build
+        --cache-from $IMAGE_NAME:latest
+        --tag $IMAGE_NAME:$IMAGE_TAG
+        --tag $IMAGE_NAME:$CI_COMMIT_REF_SLUG
+        --tag $IMAGE_NAME:latest
+        --build-arg VERSION=$CI_COMMIT_TAG
+        --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+        --build-arg VCS_REF=$CI_COMMIT_SHA
+        --label "org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
+        --label "org.opencontainers.image.version=$CI_COMMIT_TAG"
+        .
+
+    # Push образов
+    - docker push $IMAGE_NAME:$IMAGE_TAG
+    - docker push $IMAGE_NAME:$CI_COMMIT_REF_SLUG
+    - docker push $IMAGE_NAME:latest
+
+    # Сохраняем image tag для следующих стадий
+    - echo "IMAGE_TAG=$IMAGE_TAG" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  only:
+    - main
+    - develop
+    - tags
+
+# Kaniko сборка (альтернатива для Kubernetes)
+build:kaniko:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:latest
+    entrypoint: [""]
+  tags:
+    - kubernetes
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+  script:
+    - /kaniko/executor
+        --context $CI_PROJECT_DIR
+        --dockerfile $CI_PROJECT_DIR/Dockerfile
+        --destination $IMAGE_NAME:$IMAGE_TAG
+        --destination $IMAGE_NAME:$CI_COMMIT_REF_SLUG
+        --destination $IMAGE_NAME:latest
+        --cache=true
+        --cache-repo=$IMAGE_NAME/cache
+        --build-arg VERSION=$CI_COMMIT_TAG
+        --build-arg VCS_REF=$CI_COMMIT_SHA
+    - echo "IMAGE_TAG=$IMAGE_TAG" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  only:
+    - main
+    - develop
+
+# Сканирование образа
+security:trivy:
+  stage: build
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  dependencies:
+    - build:docker
+  script:
+    - trivy image
+        --severity HIGH,CRITICAL
+        --exit-code 0
+        --format json
+        --output trivy-report.json
+        $IMAGE_NAME:$IMAGE_TAG
+  artifacts:
+    reports:
+      container_scanning: trivy-report.json
+  allow_failure: true
+  only:
+    - main
+    - develop
+
+# ========================================
+# DEPLOY-TRIGGER STAGE - Триггер деплоя
+# ========================================
+
+# Обновить image tag в infra репозитории (через commit)
+update-infra:git-commit:
+  stage: deploy-trigger
+  image: alpine/git:latest
+  dependencies:
+    - build:docker
+  before_script:
+    # Настройка Git
+    - git config --global user.email "ci@gitlab.com"
+    - git config --global user.name "GitLab CI"
+
+    # Клонирование infra репозитория
+    - git clone https://oauth2:${INFRA_ACCESS_TOKEN}@gitlab.com/your-group/infra-repo.git
+    - cd infra-repo
+  script:
+    # Обновление image tag в values файле
+    - |
+      sed -i "s|tag:.*|tag: ${IMAGE_TAG}|g" helm-charts/myapp/values-${CI_COMMIT_REF_SLUG}.yaml
+
+    # Коммит и push изменений
+    - git add helm-charts/myapp/values-${CI_COMMIT_REF_SLUG}.yaml
+    - git commit -m "Update myapp image to ${IMAGE_TAG} for ${CI_COMMIT_REF_SLUG}
+
+      Triggered by: ${CI_PROJECT_NAME} - ${CI_COMMIT_TITLE}
+      Commit: ${CI_COMMIT_SHA}
+      Pipeline: ${CI_PIPELINE_URL}"
+    - git push origin main
+  only:
+    - main
+    - develop
+  when: manual
+
+# Триггер pipeline в infra репозитории (через API)
+trigger-deploy:staging:
+  stage: deploy-trigger
+  image: curlimages/curl:latest
+  dependencies:
+    - build:docker
+  script:
+    - |
+      curl -X POST \
+        -F "token=${CI_JOB_TOKEN}" \
+        -F "ref=main" \
+        -F "variables[ENVIRONMENT]=staging" \
+        -F "variables[APP_NAME]=myapp" \
+        -F "variables[IMAGE_TAG]=${IMAGE_TAG}" \
+        -F "variables[TRIGGERED_BY]=${CI_PROJECT_NAME}" \
+        "https://gitlab.com/api/v4/projects/${INFRA_PROJECT_ID}/trigger/pipeline"
+  only:
+    - develop
+  when: manual
+
+trigger-deploy:production:
+  stage: deploy-trigger
+  image: curlimages/curl:latest
+  dependencies:
+    - build:docker
+  script:
+    - |
+      curl -X POST \
+        -F "token=${CI_JOB_TOKEN}" \
+        -F "ref=main" \
+        -F "variables[ENVIRONMENT]=production" \
+        -F "variables[APP_NAME]=myapp" \
+        -F "variables[IMAGE_TAG]=${IMAGE_TAG}" \
+        -F "variables[TRIGGERED_BY]=${CI_PROJECT_NAME}" \
+        "https://gitlab.com/api/v4/projects/${INFRA_PROJECT_ID}/trigger/pipeline"
+  only:
+    - main
+  when: manual
+  environment:
+    name: production
+    action: start
+
+# Использование downstream pipeline (рекомендуется)
+trigger-deploy:downstream:
+  stage: deploy-trigger
+  dependencies:
+    - build:docker
+  trigger:
+    project: your-group/infra-repo
+    branch: main
+    strategy: depend
+  variables:
+    ENVIRONMENT: $CI_COMMIT_REF_SLUG
+    APP_NAME: myapp
+    IMAGE_TAG: $IMAGE_TAG
+    TRIGGERED_BY: $CI_PROJECT_NAME
+  only:
+    - main
+    - develop
+  when: manual
+
+# ========================================
+# Нотификации
+# ========================================
+
+notify:slack:
+  stage: deploy-trigger
+  image: curlimages/curl:latest
+  dependencies:
+    - build:docker
+  script:
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+      --data "{
+        \"text\": \"🚀 New build ready for deployment\",
+        \"blocks\": [{
+          \"type\": \"section\",
+          \"text\": {
+            \"type\": \"mrkdwn\",
+            \"text\": \"*Project:* ${CI_PROJECT_NAME}\n*Branch:* ${CI_COMMIT_REF_NAME}\n*Image:* \`${IMAGE_TAG}\`\n*Pipeline:* ${CI_PIPELINE_URL}\"
+          }
+        }]
+      }" \
+      ${SLACK_WEBHOOK_URL}
+  only:
+    - main
+    - develop
+  when: on_success
+  allow_failure: true
