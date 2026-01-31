@@ -1,0 +1,355 @@
+# GitLab CI/CD с Docker executor
+# Полный пример с тестами, линтерами и сборкой Docker образов
+
+stages:
+  - lint
+  - test
+  - security
+  - build
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_IMAGE: $CI_REGISTRY_IMAGE
+  DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+
+# ========================================
+# LINT STAGE - Проверка качества кода
+# ========================================
+
+# ESLint для JavaScript/TypeScript
+eslint:
+  stage: lint
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    - npm run lint
+    # Или напрямую:
+    # - npx eslint . --ext .js,.jsx,.ts,.tsx --max-warnings 0
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+  artifacts:
+    reports:
+      codequality: gl-code-quality-report.json
+    when: always
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+
+# Prettier для форматирования
+prettier:
+  stage: lint
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    - npx prettier --check "**/*.{js,jsx,ts,tsx,json,css,md}"
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+  allow_failure: true
+  only:
+    - merge_requests
+
+# Python линтеры
+pylint:
+  stage: lint
+  image: python:3.11-slim
+  before_script:
+    - pip install pylint flake8 black isort mypy
+  script:
+    - pylint **/*.py --exit-zero
+    - flake8 . --max-line-length=88 --extend-ignore=E203
+    - black --check .
+    - isort --check-only .
+    - mypy . --ignore-missing-imports
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+
+# YAML линтер
+yamllint:
+  stage: lint
+  image: cytopia/yamllint
+  script:
+    - yamllint -c .yamllint.yml .
+  allow_failure: true
+
+# Dockerfile линтер
+hadolint:
+  stage: lint
+  image: hadolint/hadolint:latest-alpine
+  script:
+    - hadolint Dockerfile
+    - hadolint --ignore DL3008 --ignore DL3009 Dockerfile
+  allow_failure: true
+
+# Markdown линтер
+markdownlint:
+  stage: lint
+  image: node:18-alpine
+  script:
+    - npm install -g markdownlint-cli
+    - markdownlint '**/*.md' --ignore node_modules
+  allow_failure: true
+
+# ========================================
+# TEST STAGE - Тестирование
+# ========================================
+
+# Unit тесты Node.js с покрытием
+unit-tests:
+  stage: test
+  image: node:18-alpine
+  services:
+    - postgres:15-alpine
+    - redis:7-alpine
+  variables:
+    POSTGRES_DB: test_db
+    POSTGRES_USER: test_user
+    POSTGRES_PASSWORD: test_password
+    DATABASE_URL: postgresql://test_user:test_password@postgres:5432/test_db
+    REDIS_URL: redis://redis:6379
+  before_script:
+    - npm ci
+  script:
+    - npm run test:unit -- --coverage --ci
+    # Генерация отчета для GitLab
+    - npm run test:unit -- --coverage --ci --reporters=default --reporters=jest-junit
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+    paths:
+      - coverage/
+    expire_in: 30 days
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+
+# Integration тесты
+integration-tests:
+  stage: test
+  image: node:18-alpine
+  services:
+    - postgres:15-alpine
+    - redis:7-alpine
+    - name: localstack/localstack:latest
+      alias: localstack
+  variables:
+    POSTGRES_DB: test_db
+    POSTGRES_USER: test_user
+    POSTGRES_PASSWORD: test_password
+    DATABASE_URL: postgresql://test_user:test_password@postgres:5432/test_db
+    REDIS_URL: redis://redis:6379
+    AWS_ENDPOINT: http://localstack:4566
+  before_script:
+    - npm ci
+  script:
+    - npm run test:integration
+  artifacts:
+    reports:
+      junit: integration-junit.xml
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+
+# E2E тесты с Playwright/Cypress
+e2e-tests:
+  stage: test
+  image: mcr.microsoft.com/playwright:latest
+  before_script:
+    - npm ci
+    - npx playwright install
+  script:
+    - npm run test:e2e
+  artifacts:
+    when: always
+    paths:
+      - playwright-report/
+      - test-results/
+    expire_in: 7 days
+  allow_failure: true
+  only:
+    - main
+    - merge_requests
+
+# Python тесты с pytest
+pytest:
+  stage: test
+  image: python:3.11-slim
+  services:
+    - postgres:15-alpine
+  variables:
+    POSTGRES_DB: test_db
+    POSTGRES_USER: test_user
+    POSTGRES_PASSWORD: test_password
+    DATABASE_URL: postgresql://test_user:test_password@postgres:5432/test_db
+  before_script:
+    - pip install -r requirements.txt
+    - pip install pytest pytest-cov pytest-xdist
+  script:
+    - pytest -v --cov=. --cov-report=xml --cov-report=html --cov-report=term
+    - pytest --junitxml=report.xml
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+  artifacts:
+    reports:
+      junit: report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - htmlcov/
+    expire_in: 30 days
+
+# ========================================
+# SECURITY STAGE - Проверка безопасности
+# ========================================
+
+# Dependency scanning
+dependency-scanning:
+  stage: security
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    - npm audit --production --audit-level=moderate
+    # Или с помощью snyk:
+    # - npm install -g snyk
+    # - snyk test --severity-threshold=high
+  allow_failure: true
+
+# SAST - статический анализ
+sast:
+  stage: security
+  image: returntocorp/semgrep
+  script:
+    - semgrep --config=auto --json --output=gl-sast-report.json .
+  artifacts:
+    reports:
+      sast: gl-sast-report.json
+  allow_failure: true
+
+# Secret scanning
+secret-detection:
+  stage: security
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache git
+    - wget -O /usr/local/bin/gitleaks https://github.com/gitleaks/gitleaks/releases/download/v8.18.0/gitleaks-linux-amd64
+    - chmod +x /usr/local/bin/gitleaks
+  script:
+    - gitleaks detect --source . --report-path gl-secret-detection-report.json
+  artifacts:
+    reports:
+      secret_detection: gl-secret-detection-report.json
+  allow_failure: true
+
+# ========================================
+# BUILD STAGE - Сборка Docker образов
+# ========================================
+
+# Docker build с Docker-in-Docker
+docker-build:
+  stage: build
+  image: docker:24-alpine
+  services:
+    - docker:24-dind
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    # Сборка с кешем
+    - docker pull $DOCKER_IMAGE:latest || true
+    - docker build
+        --cache-from $DOCKER_IMAGE:latest
+        --tag $DOCKER_IMAGE:$DOCKER_TAG
+        --tag $DOCKER_IMAGE:latest
+        --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+        --build-arg VCS_REF=$CI_COMMIT_SHA
+        --build-arg VERSION=$CI_COMMIT_TAG
+        .
+    - docker push $DOCKER_IMAGE:$DOCKER_TAG
+    - docker push $DOCKER_IMAGE:latest
+
+    # Сканирование образа
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+        aquasec/trivy image
+        --severity HIGH,CRITICAL
+        --exit-code 0
+        $DOCKER_IMAGE:$DOCKER_TAG
+  only:
+    - main
+    - develop
+    - tags
+
+# Multi-platform build с buildx
+docker-buildx:
+  stage: build
+  image: docker:24-alpine
+  services:
+    - docker:24-dind
+  before_script:
+    - docker run --privileged --rm tonistiigi/binfmt --install all
+    - docker buildx create --use --name multiarch --driver docker-container
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    - docker buildx build
+        --platform linux/amd64,linux/arm64
+        --tag $DOCKER_IMAGE:$DOCKER_TAG
+        --tag $DOCKER_IMAGE:latest
+        --push
+        .
+  only:
+    - tags
+
+# ========================================
+# DEPLOY STAGE
+# ========================================
+
+deploy-staging:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  environment:
+    name: staging
+    url: https://staging.example.com
+  before_script:
+    - kubectl config set-cluster k8s --server="$KUBE_URL" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="$KUBE_TOKEN"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    - kubectl set image deployment/myapp myapp=$DOCKER_IMAGE:$DOCKER_TAG -n staging
+    - kubectl rollout status deployment/myapp -n staging --timeout=5m
+  only:
+    - develop
+  when: manual
+
+deploy-production:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  environment:
+    name: production
+    url: https://example.com
+  before_script:
+    - kubectl config set-cluster k8s --server="$KUBE_URL" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="$KUBE_TOKEN"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    - kubectl set image deployment/myapp myapp=$DOCKER_IMAGE:$DOCKER_TAG -n production
+    - kubectl rollout status deployment/myapp -n production --timeout=5m
+  only:
+    - main
+  when: manual

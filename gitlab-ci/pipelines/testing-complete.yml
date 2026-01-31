@@ -1,0 +1,431 @@
+# Полный пример тестирования в GitLab CI/CD
+# Unit, Integration, E2E тесты, Performance тесты, Mutation тесты
+
+stages:
+  - lint
+  - unit-test
+  - integration-test
+  - e2e-test
+  - performance
+  - security-test
+  - build
+
+variables:
+  POSTGRES_DB: test_db
+  POSTGRES_USER: test_user
+  POSTGRES_PASSWORD: test_password
+
+# ========================================
+# LINT STAGE - Статический анализ
+# ========================================
+
+# JavaScript/TypeScript линтинг
+eslint:
+  stage: lint
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    # Базовый ESLint
+    - npm run lint
+
+    # С отчетом для GitLab
+    - npx eslint . --format gitlab > gl-code-quality-report.json || true
+
+    # Проверка с максимум 0 warnings
+    - npx eslint . --max-warnings 0
+  artifacts:
+    reports:
+      codequality: gl-code-quality-report.json
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+
+# TypeScript проверка типов
+tsc:
+  stage: lint
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    - npx tsc --noEmit --pretty
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+
+# SonarQube анализ
+sonarqube:
+  stage: lint
+  image: sonarsource/sonar-scanner-cli:latest
+  script:
+    - sonar-scanner
+        -Dsonar.projectKey=$CI_PROJECT_NAME
+        -Dsonar.sources=src
+        -Dsonar.host.url=$SONAR_HOST_URL
+        -Dsonar.login=$SONAR_TOKEN
+  allow_failure: true
+  only:
+    - main
+    - develop
+
+# ========================================
+# UNIT TEST STAGE
+# ========================================
+
+# Jest Unit тесты (Node.js)
+unit-test:jest:
+  stage: unit-test
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    # Запуск тестов с покрытием
+    - npm run test:unit --
+        --coverage
+        --ci
+        --maxWorkers=2
+        --reporters=default
+        --reporters=jest-junit
+
+    # Threshold проверка
+    - npm run test:unit --
+        --coverage
+        --coverageThreshold='{"global":{"branches":80,"functions":80,"lines":80,"statements":80}}'
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+    paths:
+      - coverage/
+    expire_in: 30 days
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+
+# Vitest тесты (альтернатива Jest)
+unit-test:vitest:
+  stage: unit-test
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    - npx vitest run --coverage --reporter=verbose --reporter=junit
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+
+# Python pytest
+unit-test:pytest:
+  stage: unit-test
+  image: python:3.11-slim
+  before_script:
+    - pip install -r requirements.txt
+    - pip install pytest pytest-cov pytest-xdist pytest-html
+  script:
+    # Параллельное выполнение тестов
+    - pytest -n auto -v
+        --cov=.
+        --cov-report=xml
+        --cov-report=html
+        --cov-report=term
+        --junitxml=report.xml
+        --html=report.html
+        --self-contained-html
+
+    # Проверка минимального покрытия
+    - pytest --cov=. --cov-fail-under=80
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+  artifacts:
+    reports:
+      junit: report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - htmlcov/
+      - report.html
+    expire_in: 30 days
+
+# Go тесты
+unit-test:go:
+  stage: unit-test
+  image: golang:1.21-alpine
+  script:
+    # Запуск тестов с покрытием
+    - go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+    # Конвертация в cobertura формат
+    - go install github.com/boumenot/gocover-cobertura@latest
+    - gocover-cobertura < coverage.out > coverage.xml
+
+    # HTML отчет
+    - go tool cover -html=coverage.out -o coverage.html
+  coverage: '/coverage: \d+.\d+% of statements/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - coverage.html
+    expire_in: 30 days
+
+# ========================================
+# INTEGRATION TEST STAGE
+# ========================================
+
+integration-test:
+  stage: integration-test
+  image: node:18-alpine
+  services:
+    - name: postgres:15-alpine
+      alias: postgres
+    - name: redis:7-alpine
+      alias: redis
+    - name: mongo:6-alpine
+      alias: mongo
+    - name: rabbitmq:3-alpine
+      alias: rabbitmq
+  variables:
+    DATABASE_URL: postgresql://test_user:test_password@postgres:5432/test_db
+    REDIS_URL: redis://redis:6379
+    MONGODB_URL: mongodb://mongo:27017/test_db
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+  before_script:
+    - npm ci
+    # Ждем готовности сервисов
+    - npm install -g wait-on
+    - wait-on tcp:postgres:5432 -t 30000
+    - wait-on tcp:redis:6379 -t 30000
+  script:
+    # Миграции БД
+    - npm run db:migrate
+
+    # Integration тесты
+    - npm run test:integration -- --ci
+  artifacts:
+    reports:
+      junit: integration-junit.xml
+    when: always
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-node
+    paths:
+      - node_modules/
+
+# API тесты с Newman (Postman)
+api-test:newman:
+  stage: integration-test
+  image: postman/newman:alpine
+  services:
+    - name: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+      alias: api
+  script:
+    - newman run postman-collection.json
+        --environment postman-environment.json
+        --reporters cli,junit,html
+        --reporter-junit-export newman-report.xml
+        --reporter-html-export newman-report.html
+  artifacts:
+    reports:
+      junit: newman-report.xml
+    paths:
+      - newman-report.html
+    when: always
+
+# Contract тесты с Pact
+contract-test:pact:
+  stage: integration-test
+  image: node:18-alpine
+  before_script:
+    - npm ci
+  script:
+    - npm run test:pact
+
+    # Публикация в Pact Broker
+    - npx pact-broker publish ./pacts
+        --consumer-app-version $CI_COMMIT_SHA
+        --broker-base-url $PACT_BROKER_URL
+        --broker-token $PACT_BROKER_TOKEN
+  only:
+    - main
+    - develop
+
+# ========================================
+# E2E TEST STAGE
+# ========================================
+
+# Playwright E2E тесты
+e2e-test:playwright:
+  stage: e2e-test
+  image: mcr.microsoft.com/playwright:latest
+  services:
+    - name: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+      alias: app
+  variables:
+    BASE_URL: http://app:3000
+  before_script:
+    - npm ci
+    - npx playwright install
+  script:
+    # Запуск E2E тестов
+    - npx playwright test
+        --reporter=list
+        --reporter=junit
+        --reporter=html
+  artifacts:
+    when: always
+    paths:
+      - playwright-report/
+      - test-results/
+    reports:
+      junit: results.xml
+    expire_in: 7 days
+
+# Cypress E2E тесты
+e2e-test:cypress:
+  stage: e2e-test
+  image: cypress/browsers:latest
+  services:
+    - name: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+      alias: app
+  variables:
+    CYPRESS_BASE_URL: http://app:3000
+  before_script:
+    - npm ci
+  script:
+    - npx cypress run
+        --browser chrome
+        --headless
+        --reporter junit
+        --reporter-options "mochaFile=cypress-results.xml"
+  artifacts:
+    when: always
+    paths:
+      - cypress/screenshots/
+      - cypress/videos/
+    reports:
+      junit: cypress-results.xml
+    expire_in: 7 days
+
+# Visual Regression тесты с Playwright
+visual-test:
+  stage: e2e-test
+  image: mcr.microsoft.com/playwright:latest
+  before_script:
+    - npm ci
+    - npx playwright install
+  script:
+    - npx playwright test --grep @visual
+  artifacts:
+    when: on_failure
+    paths:
+      - test-results/
+      - playwright-report/
+  allow_failure: true
+
+# ========================================
+# PERFORMANCE TEST STAGE
+# ========================================
+
+# Load тесты с k6
+performance-test:k6:
+  stage: performance
+  image: grafana/k6:latest
+  services:
+    - name: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+      alias: app
+  script:
+    - k6 run
+        --out json=k6-results.json
+        --summary-export=k6-summary.json
+        performance-tests/load-test.js
+  artifacts:
+    paths:
+      - k6-results.json
+      - k6-summary.json
+    expire_in: 7 days
+  allow_failure: true
+  only:
+    - main
+    - schedules
+
+# Artillery тесты
+performance-test:artillery:
+  stage: performance
+  image: node:18-alpine
+  services:
+    - name: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+      alias: app
+  before_script:
+    - npm install -g artillery
+  script:
+    - artillery run
+        --output artillery-report.json
+        performance-tests/artillery.yml
+    - artillery report artillery-report.json
+        --output artillery-report.html
+  artifacts:
+    paths:
+      - artillery-report.json
+      - artillery-report.html
+    expire_in: 7 days
+  allow_failure: true
+
+# Lighthouse Performance
+performance-test:lighthouse:
+  stage: performance
+  image: node:18
+  services:
+    - name: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+      alias: app
+  before_script:
+    - npm install -g @lhci/cli
+  script:
+    - lhci autorun
+        --collect.url=http://app:3000
+        --assert.preset=lighthouse:recommended
+  artifacts:
+    paths:
+      - .lighthouseci/
+    expire_in: 7 days
+  allow_failure: true
+
+# ========================================
+# SECURITY TEST STAGE
+# ========================================
+
+# OWASP ZAP Security тесты
+security-test:zap:
+  stage: security-test
+  image: owasp/zap2docker-stable
+  services:
+    - name: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+      alias: app
+  script:
+    - zap-baseline.py
+        -t http://app:3000
+        -r zap-report.html
+        -J zap-report.json
+  artifacts:
+    paths:
+      - zap-report.html
+      - zap-report.json
+    expire_in: 7 days
+  allow_failure: true
+  only:
+    - main
+    - schedules
