@@ -1,44 +1,51 @@
-# Ansible
-*.retry
-.vault_pass
-ansible.log
-/tmp/
-*.pyc
-
-# Terraform (если добавите в будущем)
-*.tfstate
-*.tfstate.*
-.terraform/
-*.tfvars
-
-# IDE
+# Editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Secrets и чувствительные данные
-*secret*
-*password*
-*.key
-*.pem
-*.crt
-.env
-*.env
 
 # Logs
 *.log
+logs/
 
-# Временные файлы
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Backups
+backups/
+*.backup
+*.bak
+
+# Temporary files
 tmp/
 temp/
 *.tmp
 
-# Kubectl config
-kubeconfig
-*.kubeconfig
+# Database files
+*.sql
+*.db
+*.sqlite
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+venv/
+env/
+
+# Secrets
+secrets/
+*.key
+*.pem
+*.crt
+credentials.yml
+vault-password.txt
