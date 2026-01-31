@@ -1,0 +1,190 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    restart: unless-stopped
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-myapp}
+
+    ports:
+      - "27017:27017"
+
+    volumes:
+      # Data persistence
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+
+      # Custom configuration
+      - ./mongod.conf:/etc/mongod.conf:ro
+
+      # Initialization scripts
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+
+      # Backups
+      - ./backups:/backups
+
+    command: ["mongod", "--config", "/etc/mongod.conf"]
+
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - mongodb_network
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # MongoDB replica set (optional)
+  mongodb-secondary-1:
+    image: mongo:7.0
+    container_name: mongodb-secondary-1
+    restart: unless-stopped
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password}
+
+    ports:
+      - "27018:27017"
+
+    volumes:
+      - mongodb_secondary_1_data:/data/db
+
+    command: ["mongod", "--replSet", "rs0"]
+
+    depends_on:
+      - mongodb
+
+    networks:
+      - mongodb_network
+
+    profiles:
+      - replicaset
+
+  mongodb-secondary-2:
+    image: mongo:7.0
+    container_name: mongodb-secondary-2
+    restart: unless-stopped
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password}
+
+    ports:
+      - "27019:27017"
+
+    volumes:
+      - mongodb_secondary_2_data:/data/db
+
+    command: ["mongod", "--replSet", "rs0"]
+
+    depends_on:
+      - mongodb
+
+    networks:
+      - mongodb_network
+
+    profiles:
+      - replicaset
+
+  # MongoDB Compass alternative - Mongo Express
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    restart: unless-stopped
+
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_ROOT_PASSWORD:-password}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-password}@mongodb:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: ${ME_PASSWORD:-admin}
+
+    ports:
+      - "8081:8081"
+
+    depends_on:
+      - mongodb
+
+    networks:
+      - mongodb_network
+
+    profiles:
+      - tools
+
+  # MongoDB Exporter для Prometheus
+  mongodb-exporter:
+    image: percona/mongodb_exporter:latest
+    container_name: mongodb-exporter
+    restart: unless-stopped
+
+    environment:
+      MONGODB_URI: "mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-password}@mongodb:27017"
+
+    ports:
+      - "9216:9216"
+
+    depends_on:
+      - mongodb
+
+    networks:
+      - mongodb_network
+
+    profiles:
+      - monitoring
+
+  # Backup container
+  mongodb-backup:
+    image: mongo:7.0
+    container_name: mongodb-backup
+    restart: unless-stopped
+
+    environment:
+      MONGO_HOST: mongodb
+      MONGO_PORT: 27017
+      MONGO_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_PASSWORD: ${MONGO_ROOT_PASSWORD:-password}
+      MONGO_DATABASE: ${MONGO_DATABASE:-myapp}
+      BACKUP_SCHEDULE: "0 2 * * *"
+      BACKUP_RETENTION_DAYS: 7
+
+    volumes:
+      - ./backups:/backups
+      - ../scripts/backup-mongodb.sh:/backup.sh:ro
+
+    command: >
+      sh -c "crond -f -l 2"
+
+    depends_on:
+      - mongodb
+
+    networks:
+      - mongodb_network
+
+    profiles:
+      - backup
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongodb_config:
+    driver: local
+  mongodb_secondary_1_data:
+    driver: local
+  mongodb_secondary_2_data:
+    driver: local
+
+networks:
+  mongodb_network:
+    driver: bridge
