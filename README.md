@@ -15,6 +15,10 @@
   - [USAGE_GUIDE.md](./ansible/USAGE_GUIDE.md) - Полное руководство по использованию
   - [EXAMPLES.md](./ansible/EXAMPLES.md) - 12 практических сценариев
 - **[ArgoCD](./argocd/)** - GitOps конфигурации для ArgoCD
+- **[Bash Scripting](./bash-scripting/)** - Руководство по Bash scripting с примерами
+  - [BASH_GUIDE.md](./bash-scripting/BASH_GUIDE.md) - Подробное руководство
+  - [examples/](./bash-scripting/examples/) - 10 учебных примеров
+  - [real-world/](./bash-scripting/examples/real-world/) - 4 production скрипта
 
 ## 🚀 Быстрый старт
 
@@ -52,9 +56,13 @@ devops-templates-guide/
 ├── ansible/             # Ansible
 │   ├── README.md
 │   └── playbooks/
-└── argocd/              # ArgoCD GitOps
-    ├── README.md
-    └── applications/
+├── argocd/              # ArgoCD GitOps
+│   ├── README.md
+│   └── applications/
+└── bash-scripting/       # Bash scripting
+    ├── BASH_GUIDE.md
+    ├── examples/
+    └── templates/
 ```
 
 ## 🤝 Вклад
