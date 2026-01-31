@@ -1,0 +1,460 @@
+# GitLab CI/CD - Single Repository с Kubernetes Runner
+# Jobs выполняются как pods в Kubernetes кластере
+
+stages:
+  - lint
+  - test
+  - build
+  - deploy
+  - verify
+
+variables:
+  DOCKER_DRIVER: overlay2
+  IMAGE_NAME: $CI_REGISTRY_IMAGE
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  KANIKO_IMAGE: gcr.io/kaniko-project/executor:latest
+  HELM_VERSION: "3.12.0"
+
+# ========================================
+# LINT STAGE - на Kubernetes runner
+# ========================================
+
+lint:code:
+  stage: lint
+  image: node:18-alpine
+  tags:
+    - kubernetes  # Указываем использовать K8s runner
+  before_script:
+    - npm ci
+  script:
+    - npm run lint
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  only:
+    - merge_requests
+    - main
+
+lint:helm:
+  stage: lint
+  image: alpine/helm:${HELM_VERSION}
+  tags:
+    - kubernetes
+  script:
+    - helm lint ./helm-chart
+  only:
+    - merge_requests
+    - main
+
+# ========================================
+# TEST STAGE - с сервисами в K8s
+# ========================================
+
+test:unit:
+  stage: test
+  image: node:18-alpine
+  tags:
+    - kubernetes
+  services:
+    - name: postgres:15-alpine
+      alias: postgres
+    - name: redis:7-alpine
+      alias: redis
+  variables:
+    # Resource limits для K8s runner
+    KUBERNETES_MEMORY_REQUEST: "512Mi"
+    KUBERNETES_MEMORY_LIMIT: "1Gi"
+    KUBERNETES_CPU_REQUEST: "250m"
+    KUBERNETES_CPU_LIMIT: "500m"
+
+    # Service resource limits
+    KUBERNETES_SERVICE_MEMORY_REQUEST: "256Mi"
+    KUBERNETES_SERVICE_MEMORY_LIMIT: "512Mi"
+    KUBERNETES_SERVICE_CPU_REQUEST: "100m"
+    KUBERNETES_SERVICE_CPU_LIMIT: "200m"
+
+    # Database config
+    POSTGRES_DB: test_db
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+    DATABASE_URL: postgresql://test:test@postgres:5432/test_db
+  before_script:
+    - npm ci
+  script:
+    - npm run test -- --coverage
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+
+# ========================================
+# BUILD STAGE - Kaniko (без Docker daemon)
+# ========================================
+
+build:kaniko:
+  stage: build
+  image:
+    name: $KANIKO_IMAGE
+    entrypoint: [""]
+  tags:
+    - kubernetes
+  variables:
+    # Resource limits для сборки
+    KUBERNETES_MEMORY_REQUEST: "1Gi"
+    KUBERNETES_MEMORY_LIMIT: "2Gi"
+    KUBERNETES_CPU_REQUEST: "500m"
+    KUBERNETES_CPU_LIMIT: "1000m"
+  before_script:
+    # Подготовка конфига для Docker registry
+    - mkdir -p /kaniko/.docker
+    - |
+      echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+  script:
+    # Сборка с Kaniko
+    - /kaniko/executor
+        --context "${CI_PROJECT_DIR}"
+        --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+        --destination "${IMAGE_NAME}:${IMAGE_TAG}"
+        --destination "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
+        --cache=true
+        --cache-repo="${IMAGE_NAME}/cache"
+        --cache-ttl=24h
+        --build-arg VERSION=${CI_COMMIT_TAG}
+        --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+        --label "org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+        --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}"
+        --verbosity=info
+  only:
+    - main
+    - develop
+
+# ========================================
+# DEPLOY STAGE - Через ServiceAccount в том же кластере
+# ========================================
+
+deploy:staging:in-cluster:
+  stage: deploy
+  image: alpine/helm:${HELM_VERSION}
+  tags:
+    - kubernetes
+  variables:
+    # Namespace где запущен runner
+    KUBERNETES_NAMESPACE: gitlab-runner
+
+    # Resource limits
+    KUBERNETES_MEMORY_REQUEST: "256Mi"
+    KUBERNETES_MEMORY_LIMIT: "512Mi"
+  script:
+    # Используем in-cluster config (ServiceAccount runner'а)
+    # Kubeconfig уже настроен автоматически
+
+    # Проверка доступа
+    - kubectl version --short
+    - kubectl get nodes
+
+    # Деплой с Helm
+    - helm upgrade --install myapp ./helm-chart
+        --namespace staging
+        --create-namespace
+        --set image.repository=$IMAGE_NAME
+        --set image.tag=$IMAGE_TAG
+        --set environment=staging
+        --values ./helm-chart/values-staging.yaml
+        --wait
+        --timeout 5m
+        --atomic
+
+    # Проверка
+    - kubectl get pods -n staging -l app=myapp
+    - kubectl rollout status deployment/myapp -n staging
+  environment:
+    name: staging
+    url: https://staging.example.com
+    kubernetes:
+      namespace: staging
+  only:
+    - develop
+  when: manual
+
+# ========================================
+# DEPLOY STAGE - С явным указанием kubeconfig
+# ========================================
+
+deploy:staging:explicit-config:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  tags:
+    - kubernetes
+  before_script:
+    # Даже на K8s runner можем использовать внешний kubeconfig
+    - mkdir -p ~/.kube
+    - echo "$KUBE_CONFIG_STAGING" | base64 -d > ~/.kube/config
+    - chmod 600 ~/.kube/config
+  script:
+    - kubectl set image deployment/myapp
+        myapp=$IMAGE_NAME:$IMAGE_TAG
+        -n staging
+    - kubectl rollout status deployment/myapp -n staging --timeout=5m
+  environment:
+    name: staging
+  only:
+    - develop
+  when: manual
+
+# ========================================
+# DEPLOY STAGE - Production с подтверждением
+# ========================================
+
+deploy:production:
+  stage: deploy
+  image: alpine/helm:${HELM_VERSION}
+  tags:
+    - kubernetes
+    - production  # Специальный runner для production
+  variables:
+    KUBERNETES_MEMORY_REQUEST: "512Mi"
+    KUBERNETES_MEMORY_LIMIT: "1Gi"
+  before_script:
+    # Production kubeconfig
+    - mkdir -p ~/.kube
+    - echo "$KUBE_CONFIG_PRODUCTION" | base64 -d > ~/.kube/config
+    - kubectl cluster-info
+  script:
+    # Создаем backup
+    - helm get values myapp -n production -o yaml > backup-values.yaml 2>/dev/null || true
+
+    # Показываем что изменится
+    - helm diff upgrade myapp ./helm-chart
+        --namespace production
+        --set image.repository=$IMAGE_NAME
+        --set image.tag=$IMAGE_TAG
+        --values ./helm-chart/values-production.yaml
+        --allow-unreleased || true
+
+    # Деплой
+    - helm upgrade --install myapp ./helm-chart
+        --namespace production
+        --create-namespace
+        --set image.repository=$IMAGE_NAME
+        --set image.tag=$IMAGE_TAG
+        --set environment=production
+        --values ./helm-chart/values-production.yaml
+        --wait
+        --timeout 10m
+        --atomic
+
+    # Статус
+    - helm status myapp -n production
+    - kubectl get all -n production -l app=myapp
+  artifacts:
+    paths:
+      - backup-values.yaml
+    expire_in: 30 days
+  environment:
+    name: production
+    url: https://example.com
+    kubernetes:
+      namespace: production
+  only:
+    - main
+    - tags
+  when: manual
+
+# ========================================
+# DEPLOY STAGE - Blue-Green Deployment
+# ========================================
+
+deploy:blue-green:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  tags:
+    - kubernetes
+  variables:
+    NEW_COLOR: blue  # or green
+  script:
+    # Определяем текущий цвет
+    - |
+      CURRENT_COLOR=$(kubectl get svc myapp -n production -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo "green")
+      if [ "$CURRENT_COLOR" = "blue" ]; then
+        NEW_COLOR="green"
+      else
+        NEW_COLOR="blue"
+      fi
+      echo "Current: $CURRENT_COLOR, Deploying: $NEW_COLOR"
+
+    # Деплоим новую версию
+    - kubectl apply -f - <<EOF
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: myapp-${NEW_COLOR}
+        namespace: production
+      spec:
+        replicas: 3
+        selector:
+          matchLabels:
+            app: myapp
+            color: ${NEW_COLOR}
+        template:
+          metadata:
+            labels:
+              app: myapp
+              color: ${NEW_COLOR}
+          spec:
+            containers:
+            - name: myapp
+              image: ${IMAGE_NAME}:${IMAGE_TAG}
+              ports:
+              - containerPort: 3000
+      EOF
+
+    # Ждем готовности
+    - kubectl rollout status deployment/myapp-${NEW_COLOR} -n production
+
+    # Переключаем трафик
+    - kubectl patch svc myapp -n production -p '{"spec":{"selector":{"color":"'${NEW_COLOR}'"}}}'
+
+    echo "✅ Traffic switched to ${NEW_COLOR}"
+  environment:
+    name: production
+  only:
+    - main
+  when: manual
+
+# ========================================
+# DEPLOY STAGE - Canary Deployment
+# ========================================
+
+deploy:canary:10%:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  tags:
+    - kubernetes
+  script:
+    # Деплоим canary версию (10% трафика)
+    - kubectl apply -f - <<EOF
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: myapp-canary
+        namespace: production
+      spec:
+        replicas: 1  # 10% от основных 10 реплик
+        selector:
+          matchLabels:
+            app: myapp
+            track: canary
+        template:
+          metadata:
+            labels:
+              app: myapp
+              track: canary
+              version: ${IMAGE_TAG}
+          spec:
+            containers:
+            - name: myapp
+              image: ${IMAGE_NAME}:${IMAGE_TAG}
+      EOF
+
+    - kubectl rollout status deployment/myapp-canary -n production
+  environment:
+    name: production/canary
+  only:
+    - main
+  when: manual
+
+deploy:canary:promote:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  tags:
+    - kubernetes
+  script:
+    # Обновляем основной deployment
+    - kubectl set image deployment/myapp
+        myapp=$IMAGE_NAME:$IMAGE_TAG
+        -n production
+    - kubectl rollout status deployment/myapp -n production
+
+    # Удаляем canary
+    - kubectl delete deployment myapp-canary -n production
+  environment:
+    name: production
+  needs:
+    - deploy:canary:10%
+  only:
+    - main
+  when: manual
+
+# ========================================
+# VERIFY STAGE - Smoke tests на K8s runner
+# ========================================
+
+verify:smoke-tests:
+  stage: verify
+  image: postman/newman:alpine
+  tags:
+    - kubernetes
+  variables:
+    KUBERNETES_MEMORY_REQUEST: "128Mi"
+    KUBERNETES_MEMORY_LIMIT: "256Mi"
+  script:
+    - newman run smoke-tests/collection.json
+        --environment smoke-tests/staging.json
+        --reporters cli,junit
+        --reporter-junit-export newman-report.xml
+  artifacts:
+    reports:
+      junit: newman-report.xml
+  needs:
+    - deploy:staging:in-cluster
+  only:
+    - develop
+
+# ========================================
+# VERIFY STAGE - Load testing
+# ========================================
+
+verify:load-test:
+  stage: verify
+  image: grafana/k6:latest
+  tags:
+    - kubernetes
+  variables:
+    KUBERNETES_MEMORY_REQUEST: "256Mi"
+    KUBERNETES_MEMORY_LIMIT: "512Mi"
+    KUBERNETES_CPU_REQUEST: "250m"
+    KUBERNETES_CPU_LIMIT: "500m"
+  script:
+    - k6 run --vus 10 --duration 30s load-tests/script.js
+  artifacts:
+    paths:
+      - k6-results.json
+  only:
+    - main
+  when: manual
+
+# ========================================
+# Rollback
+# ========================================
+
+rollback:production:
+  stage: deploy
+  image: alpine/helm:${HELM_VERSION}
+  tags:
+    - kubernetes
+    - production
+  before_script:
+    - mkdir -p ~/.kube
+    - echo "$KUBE_CONFIG_PRODUCTION" | base64 -d > ~/.kube/config
+  script:
+    - helm history myapp -n production
+    - helm rollback myapp -n production
+    - kubectl rollout status deployment/myapp -n production
+  environment:
+    name: production
+    action: rollback
+  only:
+    - main
+  when: manual
