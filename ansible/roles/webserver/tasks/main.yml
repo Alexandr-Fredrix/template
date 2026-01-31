@@ -1,57 +1,124 @@
 ---
-# Роль для установки и настройки веб-сервера
-- name: Update apt cache
-  apt:
-    update_cache: yes
-    cache_valid_time: 3600
-  when: ansible_os_family == "Debian"
+# Установка и настройка Nginx
 
 - name: Install Nginx
-  package:
+  apt:
     name: nginx
     state: present
+    update_cache: yes
+  tags: install
 
-- name: Create web root directory
+- name: Create web root directories
   file:
-    path: "{{ web_root }}"
+    path: "{{ item.root }}"
     state: directory
-    owner: "{{ web_user }}"
-    group: "{{ web_group }}"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
     mode: '0755'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined
+  tags: directories
 
-- name: Copy Nginx configuration
-  template:
-    src: nginx.conf.j2
-    dest: /etc/nginx/sites-available/{{ server_name }}
-    owner: root
-    group: root
-    mode: '0644'
-  notify: reload nginx
-
-- name: Enable site configuration
-  file:
-    src: /etc/nginx/sites-available/{{ server_name }}
-    dest: /etc/nginx/sites-enabled/{{ server_name }}
-    state: link
-  notify: reload nginx
-
-- name: Remove default site
+- name: Remove default Nginx site
   file:
     path: /etc/nginx/sites-enabled/default
     state: absent
   notify: reload nginx
+  tags: config
 
-- name: Configure firewall for HTTP/HTTPS
-  ufw:
-    rule: allow
-    name: "Nginx Full"
+- name: Copy main Nginx configuration
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: '0644'
+    validate: 'nginx -t -c %s'
+  notify: reload nginx
+  tags: config
 
-- name: Start and enable Nginx
+- name: Create Nginx site configurations
+  template:
+    src: site.conf.j2
+    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined
+  notify: reload nginx
+  tags: config, sites
+
+- name: Enable Nginx sites
+  file:
+    src: "/etc/nginx/sites-available/{{ item.name }}"
+    dest: "/etc/nginx/sites-enabled/{{ item.name }}"
+    state: link
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined
+  notify: reload nginx
+  tags: config, sites
+
+- name: Create SSL directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /etc/ssl/certs
+    - /etc/ssl/private
+  tags: ssl
+
+- name: Copy SSL certificates
+  copy:
+    src: "{{ item.ssl_certificate }}"
+    dest: "/etc/ssl/certs/{{ item.name }}.crt"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and item.ssl | default(false)
+  notify: reload nginx
+  tags: ssl
+
+- name: Copy SSL private keys
+  copy:
+    src: "{{ item.ssl_certificate_key }}"
+    dest: "/etc/ssl/private/{{ item.name }}.key"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ nginx_sites }}"
+  when: nginx_sites is defined and item.ssl | default(false)
+  notify: reload nginx
+  tags: ssl
+  no_log: true
+
+- name: Create Nginx cache directory
+  file:
+    path: "{{ nginx_cache_path }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+  when: nginx_cache_enabled
+  tags: cache
+
+- name: Ensure Nginx is started and enabled
   systemd:
     name: nginx
     state: started
     enabled: yes
+  tags: service
 
-- name: Install SSL certificate (if enabled)
-  include_tasks: ssl.yml
-  when: ssl_enabled | default(false)
+- name: Allow HTTP/HTTPS through firewall
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - 80
+    - 443
+  tags: firewall

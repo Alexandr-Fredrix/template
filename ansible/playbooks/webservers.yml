@@ -1,0 +1,39 @@
+---
+# Playbook для настройки веб-серверов
+
+- name: Configure web servers
+  hosts: webservers
+  become: yes
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+      tags: always
+
+  roles:
+    - role: common
+      tags: common
+
+    - role: webserver
+      tags: webserver
+
+  post_tasks:
+    - name: Verify nginx is running
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+      tags: verify
+
+    - name: Check nginx configuration
+      command: nginx -t
+      changed_when: false
+      tags: verify
+
+    - name: Display service status
+      debug:
+        msg: "Nginx is {{ 'running' if ansible_facts.services['nginx.service'].state == 'running' else 'not running' }}"
+      tags: verify

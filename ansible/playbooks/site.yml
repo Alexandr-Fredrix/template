@@ -1,0 +1,43 @@
+---
+# Главный playbook для настройки всей инфраструктуры
+
+- name: Setup all servers with common configuration
+  hosts: all
+  roles:
+    - common
+  tags:
+    - common
+    - base
+
+- name: Setup web servers
+  hosts: webservers
+  roles:
+    - webserver
+  tags:
+    - webservers
+    - nginx
+
+- name: Setup database servers
+  hosts: databases
+  roles:
+    - database
+  tags:
+    - databases
+    - postgresql
+
+- name: Setup Docker on required hosts
+  hosts: webservers:databases
+  roles:
+    - docker
+  tags:
+    - docker
+  when: docker_enabled | default(false)
+
+- name: Setup monitoring
+  hosts: monitoring
+  roles:
+    - monitoring
+  tags:
+    - monitoring
+    - prometheus
+    - grafana

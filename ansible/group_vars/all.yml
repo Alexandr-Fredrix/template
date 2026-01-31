@@ -1,0 +1,81 @@
+---
+# Глобальные переменные для всех хостов
+
+# ==================================
+# Базовые настройки
+# ==================================
+timezone: "UTC"
+locale: "en_US.UTF-8"
+
+# NTP серверы
+ntp_servers:
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+  - 2.pool.ntp.org
+
+# DNS серверы
+dns_servers:
+  - 8.8.8.8
+  - 8.8.4.4
+  - 1.1.1.1
+
+# ==================================
+# Пользователи
+# ==================================
+admin_users:
+  - name: admin
+    groups: sudo
+    shell: /bin/bash
+    ssh_key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC... admin@example.com"
+
+  - name: deploy
+    groups: sudo
+    shell: /bin/bash
+    ssh_key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC... deploy@example.com"
+
+# ==================================
+# SSH настройки
+# ==================================
+ssh_port: 22
+ssh_permit_root_login: "no"
+ssh_password_authentication: "no"
+ssh_pubkey_authentication: "yes"
+ssh_max_auth_tries: 3
+ssh_client_alive_interval: 300
+ssh_client_alive_count_max: 2
+
+# ==================================
+# Базовые пакеты
+# ==================================
+common_packages:
+  - curl
+  - wget
+  - git
+  - vim
+  - htop
+  - net-tools
+  - unzip
+  - tar
+  - ca-certificates
+  - software-properties-common
+
+# ==================================
+# Firewall настройки
+# ==================================
+firewall_allowed_tcp_ports:
+  - 22   # SSH
+  - 80   # HTTP
+  - 443  # HTTPS
+
+# ==================================
+# Логирование
+# ==================================
+log_rotation_days: 14
+log_max_size: "100M"
+
+# ==================================
+# Безопасность
+# ==================================
+security_fail2ban_enabled: true
+security_automatic_updates: true
+security_ssh_keys_only: true

@@ -1,0 +1,143 @@
+---
+# Базовая настройка всех серверов
+
+- name: Set timezone
+  timezone:
+    name: "{{ timezone }}"
+  tags: timezone
+
+- name: Set locale
+  locale_gen:
+    name: "{{ locale }}"
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: locale
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+  tags: packages
+
+- name: Upgrade all packages
+  apt:
+    upgrade: dist
+    update_cache: yes
+  when: ansible_os_family == "Debian" and security_automatic_updates
+  tags: packages
+
+- name: Install common packages
+  package:
+    name: "{{ common_packages }}"
+    state: present
+  tags: packages
+
+- name: Create admin users
+  user:
+    name: "{{ item.name }}"
+    groups: "{{ item.groups }}"
+    shell: "{{ item.shell }}"
+    createhome: yes
+    state: present
+  loop: "{{ admin_users }}"
+  tags: users
+
+- name: Add SSH keys for users
+  authorized_key:
+    user: "{{ item.name }}"
+    key: "{{ item.ssh_key }}"
+    state: present
+  loop: "{{ admin_users }}"
+  when: item.ssh_key is defined
+  tags: users, ssh
+
+- name: Configure SSH
+  template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: '0644'
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: ssh
+
+- name: Install and configure UFW
+  apt:
+    name: ufw
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: firewall
+
+- name: Allow SSH through firewall
+  ufw:
+    rule: allow
+    port: "{{ ssh_port }}"
+    proto: tcp
+  tags: firewall
+
+- name: Allow configured TCP ports
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: "{{ firewall_allowed_tcp_ports }}"
+  tags: firewall
+
+- name: Enable UFW
+  ufw:
+    state: enabled
+    policy: deny
+  tags: firewall
+
+- name: Install fail2ban
+  apt:
+    name: fail2ban
+    state: present
+  when: security_fail2ban_enabled and ansible_os_family == "Debian"
+  tags: security
+
+- name: Configure fail2ban
+  template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.local
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart fail2ban
+  when: security_fail2ban_enabled
+  tags: security
+
+- name: Configure automatic security updates
+  apt:
+    name: unattended-upgrades
+    state: present
+  when: security_automatic_updates and ansible_os_family == "Debian"
+  tags: security
+
+- name: Setup NTP
+  apt:
+    name: ntp
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: ntp
+
+- name: Configure NTP servers
+  template:
+    src: ntp.conf.j2
+    dest: /etc/ntp.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart ntp
+  tags: ntp
+
+- name: Configure DNS resolvers
+  template:
+    src: resolv.conf.j2
+    dest: /etc/resolv.conf
+    owner: root
+    group: root
+    mode: '0644'
+  tags: dns

@@ -1,0 +1,118 @@
+---
+# Установка и настройка PostgreSQL
+
+- name: Add PostgreSQL repository key
+  apt_key:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: install
+
+- name: Add PostgreSQL repository
+  apt_repository:
+    repo: "deb http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: install
+
+- name: Install PostgreSQL
+  apt:
+    name:
+      - "postgresql-{{ postgresql_version }}"
+      - "postgresql-contrib-{{ postgresql_version }}"
+      - python3-psycopg2
+    state: present
+    update_cache: yes
+  tags: install
+
+- name: Ensure PostgreSQL is started and enabled
+  systemd:
+    name: postgresql
+    state: started
+    enabled: yes
+  tags: service
+
+- name: Configure PostgreSQL
+  template:
+    src: postgresql.conf.j2
+    dest: "/etc/postgresql/{{ postgresql_version }}/main/postgresql.conf"
+    owner: postgres
+    group: postgres
+    mode: '0644'
+  notify: restart postgresql
+  tags: config
+
+- name: Configure pg_hba.conf
+  template:
+    src: pg_hba.conf.j2
+    dest: "/etc/postgresql/{{ postgresql_version }}/main/pg_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  notify: restart postgresql
+  tags: config
+
+- name: Create PostgreSQL databases
+  postgresql_db:
+    name: "{{ item.name }}"
+    encoding: "{{ item.encoding | default('UTF8') }}"
+    lc_collate: "{{ item.lc_collate | default('en_US.UTF-8') }}"
+    lc_ctype: "{{ item.lc_ctype | default('en_US.UTF-8') }}"
+    state: present
+  become_user: postgres
+  loop: "{{ postgresql_databases }}"
+  when: postgresql_databases is defined
+  tags: databases
+
+- name: Create PostgreSQL users
+  postgresql_user:
+    name: "{{ item.name }}"
+    password: "{{ item.password }}"
+    db: "{{ item.database }}"
+    priv: "{{ item.priv | default('ALL') }}"
+    state: present
+  become_user: postgres
+  loop: "{{ postgresql_users }}"
+  when: postgresql_users is defined
+  no_log: true
+  tags: users
+
+- name: Create backup directory
+  file:
+    path: "{{ backup_directory }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0700'
+  when: backup_enabled
+  tags: backup
+
+- name: Copy backup script
+  template:
+    src: pg_backup.sh.j2
+    dest: /usr/local/bin/pg_backup.sh
+    owner: postgres
+    group: postgres
+    mode: '0700'
+  when: backup_enabled
+  tags: backup
+
+- name: Setup backup cron job
+  cron:
+    name: "PostgreSQL backup"
+    minute: "0"
+    hour: "2"
+    job: "/usr/local/bin/pg_backup.sh"
+    user: postgres
+    state: "{{ 'present' if backup_enabled else 'absent' }}"
+  tags: backup
+
+- name: Allow PostgreSQL through firewall
+  ufw:
+    rule: allow
+    port: "{{ postgresql_port }}"
+    proto: tcp
+    from_ip: "{{ item }}"
+  loop: "{{ postgresql_allowed_ips | default([]) }}"
+  when: postgresql_allowed_ips is defined
+  tags: firewall

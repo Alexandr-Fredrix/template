@@ -1,0 +1,12 @@
+---
+# Handlers для роли webserver
+
+- name: reload nginx
+  systemd:
+    name: nginx
+    state: reloaded
+
+- name: restart nginx
+  systemd:
+    name: nginx
+    state: restarted

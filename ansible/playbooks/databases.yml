@@ -1,0 +1,52 @@
+---
+# Playbook для настройки серверов баз данных
+
+- name: Configure database servers
+  hosts: databases
+  become: yes
+
+  pre_tasks:
+    - name: Ensure PostgreSQL is stopped during major upgrades
+      systemd:
+        name: postgresql
+        state: stopped
+      when: postgresql_major_upgrade | default(false)
+      tags: upgrade
+
+  roles:
+    - role: common
+      tags: common
+
+    - role: database
+      tags: database
+
+  tasks:
+    - name: Configure PostgreSQL backup
+      cron:
+        name: "PostgreSQL backup"
+        minute: "0"
+        hour: "2"
+        job: "/usr/local/bin/pg_backup.sh"
+        user: postgres
+        state: "{{ 'present' if backup_enabled else 'absent' }}"
+      tags: backup
+
+  post_tasks:
+    - name: Verify PostgreSQL is running
+      systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+      tags: verify
+
+    - name: Check PostgreSQL version
+      command: psql --version
+      register: pg_version
+      changed_when: false
+      become_user: postgres
+      tags: verify
+
+    - name: Display PostgreSQL version
+      debug:
+        msg: "{{ pg_version.stdout }}"
+      tags: verify

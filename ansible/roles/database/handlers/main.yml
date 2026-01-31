@@ -1,0 +1,12 @@
+---
+# Handlers для роли database
+
+- name: restart postgresql
+  systemd:
+    name: postgresql
+    state: restarted
+
+- name: reload postgresql
+  systemd:
+    name: postgresql
+    state: reloaded

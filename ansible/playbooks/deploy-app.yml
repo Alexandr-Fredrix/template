@@ -1,62 +1,159 @@
 ---
 # Playbook для деплоя приложения
-- name: Deploy application to web servers
+
+- name: Deploy application
   hosts: webservers
   become: yes
+  serial: 1  # Rolling deployment - по одному серверу
+
   vars:
     app_name: myapp
     app_version: "{{ version | default('latest') }}"
+    app_repo: https://github.com/user/myapp.git
     app_dir: /var/www/{{ app_name }}
-    repo_url: https://github.com/user/myapp.git
+    app_user: www-data
+    backup_dir: /var/backups/{{ app_name }}
+
+  pre_tasks:
+    - name: Announce deployment
+      debug:
+        msg: "Deploying {{ app_name }} version {{ app_version }} to {{ inventory_hostname }}"
+
+    - name: Create backup directory
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        mode: '0755'
+      tags: backup
+
+    - name: Backup current version
+      synchronize:
+        src: "{{ app_dir }}/"
+        dest: "{{ backup_dir }}/{{ ansible_date_time.iso8601_basic_short }}/"
+        archive: yes
+      delegate_to: "{{ inventory_hostname }}"
+      when: app_dir is directory
+      tags: backup
+
+    - name: Remove node from load balancer
+      uri:
+        url: "http://{{ hostvars['lb1.example.com'].ansible_host }}/api/disable/{{ inventory_hostname }}"
+        method: POST
+        status_code: 200
+      delegate_to: localhost
+      ignore_errors: yes
+      tags: loadbalancer
 
   tasks:
     - name: Ensure application directory exists
       file:
         path: "{{ app_dir }}"
         state: directory
-        owner: www-data
-        group: www-data
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
         mode: '0755'
 
-    - name: Clone application repository
+    - name: Clone/update application repository
       git:
-        repo: "{{ repo_url }}"
+        repo: "{{ app_repo }}"
         dest: "{{ app_dir }}"
         version: "{{ app_version }}"
         force: yes
-      register: git_result
+      become_user: "{{ app_user }}"
       notify: restart application
+      tags: git
 
-    - name: Install dependencies
-      command: npm install --production
-      args:
-        chdir: "{{ app_dir }}"
-      when: git_result.changed
+    - name: Install Node.js dependencies
+      npm:
+        path: "{{ app_dir }}"
+        production: yes
+        state: present
+      become_user: "{{ app_user }}"
+      when: "'package.json' in lookup('fileglob', app_dir + '/package.json', wantlist=True)"
+      tags: npm
 
     - name: Build application
       command: npm run build
       args:
         chdir: "{{ app_dir }}"
-      when: git_result.changed
+      become_user: "{{ app_user }}"
+      when: "'package.json' in lookup('fileglob', app_dir + '/package.json', wantlist=True)"
+      tags: build
 
     - name: Copy environment file
       template:
-        src: ../templates/.env.j2
+        src: ../templates/app.env.j2
         dest: "{{ app_dir }}/.env"
-        owner: www-data
-        group: www-data
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
         mode: '0600'
       notify: restart application
+      tags: config
 
-    - name: Ensure application service is running
-      systemd:
-        name: "{{ app_name }}"
-        state: started
-        enabled: yes
-        daemon_reload: yes
+    - name: Run database migrations
+      command: npm run migrate
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: "{{ app_user }}"
+      run_once: true
+      when: db_role | default('') == 'primary'
+      tags: migrate
 
   handlers:
     - name: restart application
       systemd:
         name: "{{ app_name }}"
         state: restarted
+        daemon_reload: yes
+
+  post_tasks:
+    - name: Wait for application to start
+      wait_for:
+        port: 3000
+        delay: 5
+        timeout: 60
+      tags: healthcheck
+
+    - name: Health check
+      uri:
+        url: "http://localhost:3000/health"
+        status_code: 200
+      register: health_check
+      retries: 5
+      delay: 10
+      until: health_check.status == 200
+      tags: healthcheck
+
+    - name: Add node back to load balancer
+      uri:
+        url: "http://{{ hostvars['lb1.example.com'].ansible_host }}/api/enable/{{ inventory_hostname }}"
+        method: POST
+        status_code: 200
+      delegate_to: localhost
+      tags: loadbalancer
+
+    - name: Deployment success notification
+      debug:
+        msg: "Deployment completed successfully on {{ inventory_hostname }}"
+
+  rescue:
+    - name: Rollback on failure
+      debug:
+        msg: "Deployment failed, initiating rollback..."
+
+    - name: Restore from backup
+      synchronize:
+        src: "{{ backup_dir }}/{{ ansible_date_time.iso8601_basic_short }}/"
+        dest: "{{ app_dir }}/"
+        archive: yes
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Restart application after rollback
+      systemd:
+        name: "{{ app_name }}"
+        state: restarted
+
+    - name: Fail deployment
+      fail:
+        msg: "Deployment failed and rollback completed"

@@ -1,0 +1,17 @@
+# Staging Inventory
+
+[webservers]
+staging-web1.example.com ansible_host=192.168.2.10
+
+[databases]
+staging-db.example.com ansible_host=192.168.2.20
+
+[staging:children]
+webservers
+databases
+
+[staging:vars]
+ansible_user=deploy
+ansible_become=yes
+ansible_python_interpreter=/usr/bin/python3
+environment=staging

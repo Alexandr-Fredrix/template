@@ -1,0 +1,17 @@
+---
+# Handlers для роли common
+
+- name: restart sshd
+  systemd:
+    name: sshd
+    state: restarted
+
+- name: restart fail2ban
+  systemd:
+    name: fail2ban
+    state: restarted
+
+- name: restart ntp
+  systemd:
+    name: ntp
+    state: restarted

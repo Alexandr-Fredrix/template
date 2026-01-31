@@ -1,0 +1,61 @@
+---
+# Переменные для веб-серверов
+
+# ==================================
+# Nginx конфигурация
+# ==================================
+nginx_worker_processes: auto
+nginx_worker_connections: 2048
+nginx_multi_accept: "on"
+nginx_keepalive_timeout: 65
+nginx_client_max_body_size: "20M"
+
+# ==================================
+# Виртуальные хосты
+# ==================================
+nginx_sites:
+  - name: example.com
+    server_name: example.com www.example.com
+    root: /var/www/example.com
+    index: index.html index.htm
+    ssl: true
+    ssl_certificate: /etc/ssl/certs/example.com.crt
+    ssl_certificate_key: /etc/ssl/private/example.com.key
+
+  - name: api.example.com
+    server_name: api.example.com
+    proxy_pass: http://localhost:8080
+    ssl: true
+
+# ==================================
+# SSL настройки
+# ==================================
+ssl_protocols: "TLSv1.2 TLSv1.3"
+ssl_ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
+ssl_prefer_server_ciphers: "off"
+
+# ==================================
+# Application настройки
+# ==================================
+app_name: myapp
+app_user: www-data
+app_group: www-data
+app_directory: /var/www/{{ app_name }}
+
+# Node.js версия (если нужна)
+nodejs_version: "18"
+
+# ==================================
+# Логирование
+# ==================================
+nginx_access_log: /var/log/nginx/access.log
+nginx_error_log: /var/log/nginx/error.log
+nginx_log_format: combined
+
+# ==================================
+# Кеширование
+# ==================================
+nginx_cache_enabled: true
+nginx_cache_path: /var/cache/nginx
+nginx_cache_max_size: "1g"
+nginx_cache_inactive: "60m"
