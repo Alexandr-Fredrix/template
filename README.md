@@ -19,6 +19,11 @@
   - [BASH_GUIDE.md](./bash-scripting/BASH_GUIDE.md) - Подробное руководство
   - [examples/](./bash-scripting/examples/) - 10 учебных примеров
   - [real-world/](./bash-scripting/examples/real-world/) - 4 production скрипта
+- **[Databases](./databases/)** - Работа с базами данных для DevOps
+  - [PostgreSQL](./databases/postgresql/) - Продвинутая реляционная БД
+  - [MySQL](./databases/mysql/) - Популярная реляционная БД
+  - [MongoDB](./databases/mongodb/) - NoSQL документо-ориентированная БД
+  - [Comparison](./databases/comparison.md) - Сравнение и выбор БД
 
 ## 🚀 Быстрый старт
 
@@ -59,10 +64,14 @@ devops-templates-guide/
 ├── argocd/              # ArgoCD GitOps
 │   ├── README.md
 │   └── applications/
-└── bash-scripting/       # Bash scripting
-    ├── BASH_GUIDE.md
-    ├── examples/
-    └── templates/
+├── bash-scripting/       # Bash scripting
+│   ├── BASH_GUIDE.md
+│   ├── examples/
+│   └── templates/
+└── databases/            # Работа с БД
+    ├── postgresql/
+    ├── mysql/
+    └── mongodb/
 ```
 
 ## 🤝 Вклад
