@@ -1,0 +1,296 @@
+# GitLab CI/CD для Monorepo с микросервисами
+# Оптимизированный pipeline с условной сборкой только измененных сервисов
+
+stages:
+  - validate
+  - build
+  - test
+  - publish
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+  REGISTRY: $CI_REGISTRY_IMAGE
+
+# Проверка изменений в сервисах
+.changes_template: &changes_template
+  rules:
+    - changes:
+        - $SERVICE_PATH/**/*
+        - .gitlab-ci.yml
+      when: on_success
+
+# Шаблон для сборки Docker образа
+.docker_build_template: &docker_build_template
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    - cd $SERVICE_PATH
+    - docker build -t $REGISTRY/$SERVICE_NAME:$CI_COMMIT_SHORT_SHA .
+    - docker tag $REGISTRY/$SERVICE_NAME:$CI_COMMIT_SHORT_SHA $REGISTRY/$SERVICE_NAME:latest
+    - docker push $REGISTRY/$SERVICE_NAME:$CI_COMMIT_SHORT_SHA
+    - docker push $REGISTRY/$SERVICE_NAME:latest
+
+# ========================================
+# VALIDATE STAGE
+# ========================================
+
+lint_yaml:
+  stage: validate
+  image: cytopia/yamllint
+  script:
+    - yamllint -c .yamllint.yml .
+  allow_failure: true
+
+check_dependencies:
+  stage: validate
+  image: node:18-alpine
+  script:
+    - npm install -g npm-check-updates
+    - ncu -u --reject eslint  # проверка обновлений
+  allow_failure: true
+  only:
+    - schedules
+
+# ========================================
+# BUILD & TEST: Auth Service
+# ========================================
+
+build:auth-service:
+  <<: *docker_build_template
+  variables:
+    SERVICE_NAME: auth-service
+    SERVICE_PATH: services/auth-service
+  rules:
+    - changes:
+        - services/auth-service/**/*
+
+test:auth-service:
+  stage: test
+  image: node:18-alpine
+  services:
+    - postgres:15-alpine
+  variables:
+    SERVICE_PATH: services/auth-service
+  before_script:
+    - cd $SERVICE_PATH
+    - npm ci
+  script:
+    - npm run test
+    - npm run test:integration
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  rules:
+    - changes:
+        - services/auth-service/**/*
+
+# ========================================
+# BUILD & TEST: User Service
+# ========================================
+
+build:user-service:
+  <<: *docker_build_template
+  variables:
+    SERVICE_NAME: user-service
+    SERVICE_PATH: services/user-service
+  rules:
+    - changes:
+        - services/user-service/**/*
+
+test:user-service:
+  stage: test
+  image: node:18-alpine
+  services:
+    - postgres:15-alpine
+    - redis:7-alpine
+  variables:
+    SERVICE_PATH: services/user-service
+  before_script:
+    - cd $SERVICE_PATH
+    - npm ci
+  script:
+    - npm run test
+  rules:
+    - changes:
+        - services/user-service/**/*
+
+# ========================================
+# BUILD & TEST: Product Service
+# ========================================
+
+build:product-service:
+  <<: *docker_build_template
+  variables:
+    SERVICE_NAME: product-service
+    SERVICE_PATH: services/product-service
+  rules:
+    - changes:
+        - services/product-service/**/*
+
+test:product-service:
+  stage: test
+  image: python:3.11-slim
+  services:
+    - postgres:15-alpine
+  variables:
+    SERVICE_PATH: services/product-service
+  before_script:
+    - cd $SERVICE_PATH
+    - pip install -r requirements.txt
+  script:
+    - pytest --cov=. --cov-report=xml
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+  rules:
+    - changes:
+        - services/product-service/**/*
+
+# ========================================
+# BUILD & TEST: Order Service
+# ========================================
+
+build:order-service:
+  <<: *docker_build_template
+  variables:
+    SERVICE_NAME: order-service
+    SERVICE_PATH: services/order-service
+  rules:
+    - changes:
+        - services/order-service/**/*
+
+test:order-service:
+  stage: test
+  image: golang:1.21-alpine
+  services:
+    - postgres:15-alpine
+    - redis:7-alpine
+  variables:
+    SERVICE_PATH: services/order-service
+  before_script:
+    - cd $SERVICE_PATH
+    - go mod download
+  script:
+    - go test -v -cover ./...
+  rules:
+    - changes:
+        - services/order-service/**/*
+
+# ========================================
+# BUILD & TEST: Frontend
+# ========================================
+
+build:frontend:
+  <<: *docker_build_template
+  variables:
+    SERVICE_NAME: frontend
+    SERVICE_PATH: frontend
+  rules:
+    - changes:
+        - frontend/**/*
+
+test:frontend:
+  stage: test
+  image: node:18-alpine
+  variables:
+    SERVICE_PATH: frontend
+  before_script:
+    - cd $SERVICE_PATH
+    - npm ci
+  script:
+    - npm run lint
+    - npm run test
+    - npm run build
+  artifacts:
+    paths:
+      - frontend/dist/
+  rules:
+    - changes:
+        - frontend/**/*
+
+# ========================================
+# PUBLISH STAGE (Helm Chart)
+# ========================================
+
+publish:helm-chart:
+  stage: publish
+  image: alpine/helm:latest
+  script:
+    - helm package helm-chart/
+    - curl --request POST
+      --form "chart=@myapp-*.tgz"
+      --user "gitlab-ci-token:$CI_JOB_TOKEN"
+      "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/api/stable/charts"
+  only:
+    - main
+    - tags
+
+# ========================================
+# DEPLOY STAGE
+# ========================================
+
+deploy:staging:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  environment:
+    name: staging
+    url: https://staging.example.com
+  script:
+    - kubectl config set-cluster k8s --server="$KUBE_URL"
+    - kubectl config set-credentials admin --token="$KUBE_TOKEN"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+    # Обновляем только измененные сервисы
+    - |
+      for service in auth-service user-service product-service order-service; do
+        if [ -n "$(git diff --name-only $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA | grep services/$service)" ]; then
+          kubectl set image deployment/$service $service=$REGISTRY/$service:$CI_COMMIT_SHORT_SHA -n staging
+        fi
+      done
+  only:
+    - develop
+  when: manual
+
+deploy:production:
+  stage: deploy
+  image: alpine/helm:latest
+  environment:
+    name: production
+    url: https://example.com
+  before_script:
+    - kubectl config set-cluster k8s --server="$KUBE_URL"
+    - kubectl config set-credentials admin --token="$KUBE_TOKEN"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    - helm upgrade --install myapp ./helm-chart
+      --namespace production
+      --set global.registry=$REGISTRY
+      --set global.tag=$CI_COMMIT_SHORT_SHA
+      --wait
+      --timeout 10m
+  only:
+    - main
+  when: manual
+
+# ========================================
+# ROLLBACK
+# ========================================
+
+rollback:production:
+  stage: deploy
+  image: alpine/helm:latest
+  environment:
+    name: production
+    action: rollback
+  before_script:
+    - kubectl config set-cluster k8s --server="$KUBE_URL"
+    - kubectl config set-credentials admin --token="$KUBE_TOKEN"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+  script:
+    - helm rollback myapp -n production
+  only:
+    - main
+  when: manual

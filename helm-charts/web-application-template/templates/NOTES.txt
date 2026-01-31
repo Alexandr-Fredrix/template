@@ -1,0 +1,52 @@
+🎉 {{ .Chart.Name }} успешно установлен!
+
+📝 Релиз: {{ .Release.Name }}
+🔖 Версия чарта: {{ .Chart.Version }}
+🚀 Версия приложения: {{ .Chart.AppVersion }}
+📦 Namespace: {{ .Release.Namespace }}
+
+{{- if .Values.ingress.enabled }}
+🌐 Приложение доступно по адресу:
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "web-application.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  NOTE: Может потребоваться несколько минут для получения LoadBalancer IP.
+  Вы можете отслеживать статус командой:
+  kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "web-application.fullname" . }}
+{{- else if contains "ClusterIP" .Values.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "web-application.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  echo "Проброс порта: kubectl port-forward $POD_NAME 8080:{{ .Values.service.targetPort }}"
+  echo "Откройте http://127.0.0.1:8080"
+{{- end }}
+
+📊 Полезные команды:
+
+# Посмотреть поды
+kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+# Посмотреть логи
+kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} --tail=100 -f
+
+# Посмотреть конфигурацию релиза
+helm get values {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+# Обновить релиз
+helm upgrade {{ .Release.Name }} {{ .Chart.Name }} -n {{ .Release.Namespace }} -f values.yaml
+
+# Откатить релиз
+helm rollback {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+{{- if .Values.autoscaling.enabled }}
+🔄 Autoscaling включен ({{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} реплик)
+{{- end }}
+
+{{- if .Values.persistence.enabled }}
+💾 Persistent storage включен ({{ .Values.persistence.size }})
+{{- end }}

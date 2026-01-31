@@ -1,0 +1,54 @@
+# ApplicationSet для деплоя в несколько окружений
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: myapp-environments
+  namespace: argocd
+spec:
+  # Генератор списка окружений
+  generators:
+  - list:
+      elements:
+      - environment: dev
+        replicas: "1"
+        domain: dev.example.com
+      - environment: staging
+        replicas: "2"
+        domain: staging.example.com
+      - environment: production
+        replicas: "5"
+        domain: example.com
+
+  # Шаблон Application
+  template:
+    metadata:
+      name: 'myapp-{{environment}}'
+      labels:
+        environment: '{{environment}}'
+    spec:
+      project: default
+
+      source:
+        repoURL: https://github.com/user/my-app.git
+        targetRevision: main
+        path: helm-chart
+        helm:
+          valueFiles:
+            - values.yaml
+            - 'values-{{environment}}.yaml'
+          parameters:
+            - name: replicaCount
+              value: '{{replicas}}'
+            - name: ingress.hosts[0].host
+              value: '{{domain}}'
+
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{environment}}'
+
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

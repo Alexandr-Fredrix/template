@@ -1,0 +1,32 @@
+# Dockerfile для FastAPI приложения с Uvicorn
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Создаем пользователя
+RUN useradd -m -u 1000 fastapi && \
+    chown -R fastapi:fastapi /app
+
+# Копируем requirements
+COPY requirements.txt .
+
+# Устанавливаем зависимости
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt uvicorn[standard]
+
+# Копируем приложение
+COPY --chown=fastapi:fastapi . .
+
+USER fastapi
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
+# Запуск с Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

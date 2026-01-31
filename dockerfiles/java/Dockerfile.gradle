@@ -1,0 +1,44 @@
+# Multi-stage build для Java с Gradle
+
+# ============================================
+# Стадия 1: Сборка с Gradle
+# ============================================
+FROM gradle:8-jdk17-alpine AS builder
+
+WORKDIR /app
+
+# Копируем gradle файлы для кеширования зависимостей
+COPY build.gradle settings.gradle ./
+COPY gradle ./gradle
+
+# Скачиваем зависимости
+RUN gradle dependencies --no-daemon
+
+# Копируем исходники
+COPY src ./src
+
+# Собираем приложение
+RUN gradle clean build --no-daemon -x test
+
+# ============================================
+# Стадия 2: Runtime
+# ============================================
+FROM eclipse-temurin:17-jre-alpine
+
+WORKDIR /app
+
+RUN addgroup -S spring && adduser -S spring -G spring
+
+# Копируем jar
+COPY --from=builder --chown=spring:spring /app/build/libs/*.jar app.jar
+
+USER spring
+
+ENV JAVA_OPTS="-Xmx512m -Xms256m"
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]

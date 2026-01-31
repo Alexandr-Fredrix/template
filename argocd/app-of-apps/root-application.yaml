@@ -1,0 +1,29 @@
+# Root Application - "App of Apps" pattern
+# Управляет всеми дочерними приложениями
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cluster-apps
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/user/infrastructure.git
+    targetRevision: main
+    path: argocd/applications
+    directory:
+      recurse: true  # Рекурсивно искать приложения
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

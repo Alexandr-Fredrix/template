@@ -1,0 +1,51 @@
+# Multi-stage build для TypeScript приложения
+
+# ============================================
+# Стадия 1: Сборка TypeScript
+# ============================================
+FROM node:18-alpine AS builder
+WORKDIR /app
+
+# Копируем package файлы
+COPY package.json package-lock.json* tsconfig.json ./
+
+# Устанавливаем зависимости
+RUN npm ci
+
+# Копируем исходники
+COPY src ./src
+
+# Компилируем TypeScript в JavaScript
+RUN npm run build
+
+# Устанавливаем только production зависимости
+RUN npm ci --only=production && \
+    npm cache clean --force
+
+# ============================================
+# Стадия 2: Production образ
+# ============================================
+FROM node:18-alpine AS runner
+WORKDIR /app
+
+# Создаем пользователя
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nodejs
+
+# Копируем скомпилированный код
+COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
+
+# Переменные окружения
+ENV NODE_ENV=production \
+    PORT=3000
+
+USER nodejs
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD node dist/healthcheck.js
+
+CMD ["node", "dist/index.js"]

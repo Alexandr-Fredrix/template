@@ -1,0 +1,52 @@
+# Простое ArgoCD Application для деплоя из Git
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: simple-webapp
+  namespace: argocd
+  # Finalizers для правильного удаления ресурсов
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # Проект (default или кастомный)
+  project: default
+
+  # Источник - Git репозиторий
+  source:
+    repoURL: https://github.com/user/my-app.git
+    targetRevision: main
+    path: kubernetes/manifests
+
+  # Назначение - кластер и namespace
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: webapp
+
+  # Политика синхронизации
+  syncPolicy:
+    # Автоматическая синхронизация
+    automated:
+      prune: true       # Удалять ресурсы удаленные из Git
+      selfHeal: true    # Автоматически восстанавливать изменения
+      allowEmpty: false # Не удалять все ресурсы если в Git пусто
+
+    # Опции синхронизации
+    syncOptions:
+      - CreateNamespace=true    # Создать namespace если не существует
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true         # Удалять ресурсы в конце синхронизации
+
+    # Retry политика
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Игнорировать различия
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas  # Игнорировать изменения в replicas (для HPA)

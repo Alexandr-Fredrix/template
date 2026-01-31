@@ -1,0 +1,239 @@
+# Default values for web-application.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Количество реплик приложения
+replicaCount: 2
+
+# Конфигурация образа
+image:
+  repository: nginx
+  pullPolicy: IfNotPresent
+  # Переопределяет appVersion из Chart.yaml
+  tag: ""
+
+# Secrets для приватных registry
+imagePullSecrets: []
+# - name: my-registry-secret
+
+# Переопределение имени чарта
+nameOverride: ""
+fullnameOverride: ""
+
+# ServiceAccount конфигурация
+serviceAccount:
+  # Создавать ли ServiceAccount
+  create: true
+  # Annotations для ServiceAccount
+  annotations: {}
+  # Имя ServiceAccount (если не указано, генерируется автоматически)
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+  # prometheus.io/scrape: "true"
+  # prometheus.io/port: "8080"
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+
+# Переменные окружения
+env:
+  - name: ENVIRONMENT
+    value: "production"
+  - name: LOG_LEVEL
+    value: "info"
+
+# Переменные из ConfigMap или Secret
+envFrom: []
+  # - configMapRef:
+  #     name: app-config
+  # - secretRef:
+  #     name: app-secrets
+
+# Service конфигурация
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  # Дополнительные порты
+  additionalPorts: []
+  # - name: metrics
+  #   port: 9090
+  #   targetPort: 9090
+
+# Ingress конфигурация
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # nginx.ingress.kubernetes.io/rate-limit: "100"
+  hosts:
+    - host: app.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: app-example-com-tls
+      hosts:
+        - app.example.com
+
+# Resources (важно для production!)
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+# Autoscaling конфигурация
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Health checks
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Startup probe (для медленно стартующих приложений)
+startupProbe: {}
+  # httpGet:
+  #   path: /health
+  #   port: 8080
+  # failureThreshold: 30
+  # periodSeconds: 10
+
+# Node selector
+nodeSelector: {}
+  # disktype: ssd
+  # environment: production
+
+# Tolerations
+tolerations: []
+  # - key: "key1"
+  #   operator: "Equal"
+  #   value: "value1"
+  #   effect: "NoSchedule"
+
+# Affinity rules
+affinity: {}
+  # podAntiAffinity:
+  #   preferredDuringSchedulingIgnoredDuringExecution:
+  #   - weight: 100
+  #     podAffinityTerm:
+  #       labelSelector:
+  #         matchExpressions:
+  #         - key: app.kubernetes.io/name
+  #           operator: In
+  #           values:
+  #           - web-application
+  #       topologyKey: kubernetes.io/hostname
+
+# Volumes
+persistence:
+  enabled: false
+  # existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  mountPath: /data
+
+# ConfigMap данные
+configMap:
+  enabled: true
+  data:
+    application.conf: |
+      server.port=8080
+      logging.level=INFO
+    database.conf: |
+      pool.size=10
+      timeout=30s
+
+# Secrets (НЕ ХРАНИТЕ РЕАЛЬНЫЕ СЕКРЕТЫ ЗДЕСЬ!)
+# Используйте external-secrets, sealed-secrets или vault
+secrets:
+  enabled: false
+  data: {}
+    # DATABASE_PASSWORD: "cGFzc3dvcmQ="  # base64 encoded
+
+# Metrics и мониторинг
+metrics:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    path: /metrics
+    port: metrics
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# Network Policy
+networkPolicy:
+  enabled: false
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+
+# Init containers
+initContainers: []
+  # - name: wait-for-db
+  #   image: busybox:1.28
+  #   command: ['sh', '-c', 'until nc -z postgres 5432; do echo waiting for db; sleep 2; done;']
+
+# Sidecar containers
+sidecars: []
+  # - name: log-collector
+  #   image: fluent/fluent-bit:latest
+  #   volumeMounts:
+  #     - name: logs
+  #       mountPath: /var/log
+
+# Дополнительные volumes
+extraVolumes: []
+  # - name: config
+  #   configMap:
+  #     name: extra-config
+
+# Дополнительные volumeMounts
+extraVolumeMounts: []
+  # - name: config
+  #   mountPath: /etc/config
+  #   readOnly: true

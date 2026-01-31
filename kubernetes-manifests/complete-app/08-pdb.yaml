@@ -1,0 +1,20 @@
+# PodDisruptionBudget для обеспечения доступности
+# Гарантирует минимальное количество доступных подов во время обновлений
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: myapp-pdb
+  namespace: myapp
+  labels:
+    app: myapp
+spec:
+  # Минимум 2 пода должны быть доступны
+  minAvailable: 2
+
+  # Или: максимум 1 под может быть недоступен
+  # maxUnavailable: 1
+
+  selector:
+    matchLabels:
+      app: myapp
+      tier: backend

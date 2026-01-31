@@ -1,0 +1,57 @@
+---
+# Роль для установки и настройки веб-сервера
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+
+- name: Install Nginx
+  package:
+    name: nginx
+    state: present
+
+- name: Create web root directory
+  file:
+    path: "{{ web_root }}"
+    state: directory
+    owner: "{{ web_user }}"
+    group: "{{ web_group }}"
+    mode: '0755'
+
+- name: Copy Nginx configuration
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/sites-available/{{ server_name }}
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload nginx
+
+- name: Enable site configuration
+  file:
+    src: /etc/nginx/sites-available/{{ server_name }}
+    dest: /etc/nginx/sites-enabled/{{ server_name }}
+    state: link
+  notify: reload nginx
+
+- name: Remove default site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
+
+- name: Configure firewall for HTTP/HTTPS
+  ufw:
+    rule: allow
+    name: "Nginx Full"
+
+- name: Start and enable Nginx
+  systemd:
+    name: nginx
+    state: started
+    enabled: yes
+
+- name: Install SSL certificate (if enabled)
+  include_tasks: ssl.yml
+  when: ssl_enabled | default(false)

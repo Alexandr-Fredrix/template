@@ -1,0 +1,239 @@
+# Complete CI/CD для Node.js приложения с Docker и Kubernetes
+
+stages:
+  - build
+  - test
+  - security
+  - publish
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_IMAGE: $CI_REGISTRY_IMAGE
+  DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+  KUBERNETES_VERSION: "1.28"
+  HELM_VERSION: "3.12.0"
+
+# Шаблоны для переиспользования
+.docker_login: &docker_login
+  - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+
+.kubectl_config: &kubectl_config
+  - kubectl config set-cluster k8s --server="$KUBE_URL" --insecure-skip-tls-verify=true
+  - kubectl config set-credentials admin --token="$KUBE_TOKEN"
+  - kubectl config set-context default --cluster=k8s --user=admin
+  - kubectl config use-context default
+
+# ========================================
+# BUILD STAGE
+# ========================================
+
+install_dependencies:
+  stage: build
+  image: node:18-alpine
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+      - .npm/
+  script:
+    - npm ci --cache .npm --prefer-offline
+  artifacts:
+    paths:
+      - node_modules/
+    expire_in: 1 hour
+  only:
+    - merge_requests
+    - main
+    - develop
+
+build_application:
+  stage: build
+  image: node:18-alpine
+  dependencies:
+    - install_dependencies
+  script:
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 day
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# ========================================
+# TEST STAGE
+# ========================================
+
+unit_tests:
+  stage: test
+  image: node:18-alpine
+  dependencies:
+    - install_dependencies
+  script:
+    - npm run test:unit -- --coverage
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+  only:
+    - merge_requests
+    - main
+    - develop
+
+integration_tests:
+  stage: test
+  image: node:18-alpine
+  services:
+    - postgres:15-alpine
+    - redis:7-alpine
+  variables:
+    POSTGRES_DB: test_db
+    POSTGRES_USER: test_user
+    POSTGRES_PASSWORD: test_password
+  dependencies:
+    - install_dependencies
+  script:
+    - npm run test:integration
+  only:
+    - merge_requests
+    - main
+
+lint:
+  stage: test
+  image: node:18-alpine
+  dependencies:
+    - install_dependencies
+  script:
+    - npm run lint
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+
+# ========================================
+# SECURITY STAGE
+# ========================================
+
+dependency_scanning:
+  stage: security
+  image: node:18-alpine
+  dependencies:
+    - install_dependencies
+  script:
+    - npm audit --production
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+
+trivy_scan:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image --severity HIGH,CRITICAL --exit-code 0 $DOCKER_IMAGE:$DOCKER_TAG
+  dependencies:
+    - docker_build
+  only:
+    - main
+    - develop
+
+# ========================================
+# PUBLISH STAGE
+# ========================================
+
+docker_build:
+  stage: publish
+  image: docker:24
+  services:
+    - docker:24-dind
+  dependencies:
+    - build_application
+  before_script:
+    - *docker_login
+  script:
+    - docker build -t $DOCKER_IMAGE:$DOCKER_TAG .
+    - docker tag $DOCKER_IMAGE:$DOCKER_TAG $DOCKER_IMAGE:latest
+    - docker push $DOCKER_IMAGE:$DOCKER_TAG
+    - docker push $DOCKER_IMAGE:latest
+  only:
+    - main
+    - develop
+
+# ========================================
+# DEPLOY STAGE
+# ========================================
+
+deploy_staging:
+  stage: deploy
+  image: alpine/k8s:$KUBERNETES_VERSION
+  environment:
+    name: staging
+    url: https://staging.example.com
+    on_stop: stop_staging
+  before_script:
+    - *kubectl_config
+  script:
+    - kubectl set image deployment/myapp myapp=$DOCKER_IMAGE:$DOCKER_TAG -n staging
+    - kubectl rollout status deployment/myapp -n staging
+    - kubectl get pods -n staging
+  only:
+    - develop
+  when: manual
+
+deploy_production:
+  stage: deploy
+  image: alpine/k8s:$KUBERNETES_VERSION
+  environment:
+    name: production
+    url: https://example.com
+  before_script:
+    - *kubectl_config
+  script:
+    - kubectl set image deployment/myapp myapp=$DOCKER_IMAGE:$DOCKER_TAG -n production
+    - kubectl rollout status deployment/myapp -n production --timeout=5m
+    - kubectl get pods -n production
+  only:
+    - main
+  when: manual
+
+deploy_with_helm:
+  stage: deploy
+  image: alpine/helm:$HELM_VERSION
+  environment:
+    name: production
+    url: https://example.com
+  before_script:
+    - *kubectl_config
+  script:
+    - helm upgrade --install myapp ./helm-chart
+      --namespace production
+      --set image.tag=$DOCKER_TAG
+      --set image.repository=$DOCKER_IMAGE
+      --wait
+      --timeout 5m
+  only:
+    - main
+  when: manual
+
+stop_staging:
+  stage: deploy
+  image: alpine/k8s:$KUBERNETES_VERSION
+  environment:
+    name: staging
+    action: stop
+  before_script:
+    - *kubectl_config
+  script:
+    - kubectl delete namespace staging
+  when: manual
+  only:
+    - develop

@@ -1,0 +1,152 @@
+# Микросервисная архитектура с Kong Gateway
+
+version: '3.8'
+
+services:
+  # Kong Gateway
+  kong-gateway:
+    image: kong:latest
+    container_name: kong-gateway
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: kong-database
+      KONG_PG_USER: kong
+      KONG_PG_PASSWORD: ${KONG_PG_PASSWORD}
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+    ports:
+      - "8000:8000"   # Proxy HTTP
+      - "8443:8443"   # Proxy HTTPS
+      - "8001:8001"   # Admin API
+    depends_on:
+      kong-database:
+        condition: service_healthy
+    networks:
+      - gateway-network
+      - services-network
+    restart: unless-stopped
+
+  # Kong Database
+  kong-database:
+    image: postgres:15-alpine
+    container_name: kong-database
+    environment:
+      POSTGRES_USER: kong
+      POSTGRES_PASSWORD: ${KONG_PG_PASSWORD}
+      POSTGRES_DB: kong
+    volumes:
+      - kong_data:/var/lib/postgresql/data
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kong"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # User Service
+  user-service:
+    build: ./services/user-service
+    container_name: user-service
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@postgres:5432/users
+      - REDIS_URL=redis://redis:6379
+      - SERVICE_PORT=3001
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - services-network
+      - data-network
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+
+  # Product Service
+  product-service:
+    build: ./services/product-service
+    container_name: product-service
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@postgres:5432/products
+      - REDIS_URL=redis://redis:6379
+      - SERVICE_PORT=3002
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - services-network
+      - data-network
+    restart: unless-stopped
+
+  # Order Service
+  order-service:
+    build: ./services/order-service
+    container_name: order-service
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@postgres:5432/orders
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - SERVICE_PORT=3003
+    depends_on:
+      - postgres
+      - rabbitmq
+    networks:
+      - services-network
+      - data-network
+    restart: unless-stopped
+
+  # PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-dbs.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - data-network
+    restart: unless-stopped
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    volumes:
+      - redis_data:/data
+    networks:
+      - data-network
+    restart: unless-stopped
+
+  # RabbitMQ
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - data-network
+    restart: unless-stopped
+
+volumes:
+  kong_data:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+
+networks:
+  gateway-network:
+    driver: bridge
+  services-network:
+    driver: bridge
+  data-network:
+    driver: bridge
+    internal: true

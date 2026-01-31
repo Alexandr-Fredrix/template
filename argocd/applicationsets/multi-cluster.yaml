@@ -1,0 +1,56 @@
+# ApplicationSet для деплоя в несколько кластеров
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: myapp-multicluster
+  namespace: argocd
+spec:
+  # Cluster generator - автоматически находит все кластеры
+  generators:
+  - clusters:
+      selector:
+        matchLabels:
+          environment: production
+      values:
+        revision: main
+        replicaCount: "3"
+
+  # Можно комбинировать с list generator
+  # - list:
+  #     elements:
+  #     - cluster: prod-us-east
+  #       url: https://prod-us-east.k8s.local
+  #       region: us-east-1
+  #     - cluster: prod-eu-west
+  #       url: https://prod-eu-west.k8s.local
+  #       region: eu-west-1
+
+  template:
+    metadata:
+      name: 'myapp-{{name}}'
+      labels:
+        cluster: '{{name}}'
+    spec:
+      project: default
+
+      source:
+        repoURL: https://github.com/user/my-app.git
+        targetRevision: '{{values.revision}}'
+        path: helm-chart
+        helm:
+          parameters:
+            - name: replicaCount
+              value: '{{values.replicaCount}}'
+            - name: cluster
+              value: '{{name}}'
+
+      destination:
+        server: '{{server}}'
+        namespace: myapp
+
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

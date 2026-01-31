@@ -1,0 +1,62 @@
+---
+# Playbook для деплоя приложения
+- name: Deploy application to web servers
+  hosts: webservers
+  become: yes
+  vars:
+    app_name: myapp
+    app_version: "{{ version | default('latest') }}"
+    app_dir: /var/www/{{ app_name }}
+    repo_url: https://github.com/user/myapp.git
+
+  tasks:
+    - name: Ensure application directory exists
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Clone application repository
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_dir }}"
+        version: "{{ app_version }}"
+        force: yes
+      register: git_result
+      notify: restart application
+
+    - name: Install dependencies
+      command: npm install --production
+      args:
+        chdir: "{{ app_dir }}"
+      when: git_result.changed
+
+    - name: Build application
+      command: npm run build
+      args:
+        chdir: "{{ app_dir }}"
+      when: git_result.changed
+
+    - name: Copy environment file
+      template:
+        src: ../templates/.env.j2
+        dest: "{{ app_dir }}/.env"
+        owner: www-data
+        group: www-data
+        mode: '0600'
+      notify: restart application
+
+    - name: Ensure application service is running
+      systemd:
+        name: "{{ app_name }}"
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+  handlers:
+    - name: restart application
+      systemd:
+        name: "{{ app_name }}"
+        state: restarted

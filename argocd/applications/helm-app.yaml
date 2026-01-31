@@ -1,0 +1,63 @@
+# ArgoCD Application с Helm chart
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: myapp-production
+  namespace: argocd
+  labels:
+    environment: production
+    team: backend
+spec:
+  project: production
+
+  source:
+    repoURL: https://github.com/user/my-app.git
+    targetRevision: v1.2.3
+    path: helm-chart
+
+    # Helm параметры
+    helm:
+      # Values файлы по порядку (последующие переопределяют предыдущие)
+      valueFiles:
+        - values.yaml
+        - values-production.yaml
+
+      # Переопределение отдельных параметров
+      parameters:
+        - name: image.tag
+          value: v1.2.3
+        - name: replicaCount
+          value: "5"
+        - name: resources.limits.memory
+          value: "1Gi"
+
+      # Release name для Helm
+      releaseName: myapp-prod
+
+      # Пропустить CRDs
+      skipCrds: false
+
+      # Values inline
+      values: |
+        ingress:
+          enabled: true
+          hosts:
+            - host: app.example.com
+              paths:
+                - path: /
+                  pathType: Prefix
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+
+  # Информация о версии для rollback
+  revisionHistoryLimit: 10

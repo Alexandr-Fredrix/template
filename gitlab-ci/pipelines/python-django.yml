@@ -1,0 +1,191 @@
+# GitLab CI/CD для Python Django приложения
+
+stages:
+  - build
+  - test
+  - security
+  - deploy
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  POSTGRES_DB: django_test
+  POSTGRES_USER: django
+  POSTGRES_PASSWORD: django_password
+  DATABASE_URL: postgresql://django:django_password@postgres:5432/django_test
+
+# Кеширование pip пакетов
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+# ========================================
+# BUILD STAGE
+# ========================================
+
+install_dependencies:
+  stage: build
+  image: python:3.11
+  script:
+    - python -m venv venv
+    - source venv/bin/activate
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+  artifacts:
+    paths:
+      - venv/
+    expire_in: 1 hour
+  only:
+    - merge_requests
+    - main
+    - develop
+
+collect_static:
+  stage: build
+  image: python:3.11
+  dependencies:
+    - install_dependencies
+  script:
+    - source venv/bin/activate
+    - python manage.py collectstatic --noinput
+  artifacts:
+    paths:
+      - staticfiles/
+    expire_in: 1 day
+  only:
+    - main
+    - develop
+
+# ========================================
+# TEST STAGE
+# ========================================
+
+django_tests:
+  stage: test
+  image: python:3.11
+  services:
+    - postgres:15-alpine
+  dependencies:
+    - install_dependencies
+  before_script:
+    - source venv/bin/activate
+  script:
+    - python manage.py migrate
+    - coverage run --source='.' manage.py test
+    - coverage report
+    - coverage xml
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+  only:
+    - merge_requests
+    - main
+    - develop
+
+linting:
+  stage: test
+  image: python:3.11
+  dependencies:
+    - install_dependencies
+  before_script:
+    - source venv/bin/activate
+  script:
+    - flake8 .
+    - black --check .
+    - isort --check-only .
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+
+type_checking:
+  stage: test
+  image: python:3.11
+  dependencies:
+    - install_dependencies
+  before_script:
+    - source venv/bin/activate
+  script:
+    - mypy .
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+
+# ========================================
+# SECURITY STAGE
+# ========================================
+
+security_check:
+  stage: security
+  image: python:3.11
+  dependencies:
+    - install_dependencies
+  before_script:
+    - source venv/bin/activate
+  script:
+    - pip install bandit safety
+    - bandit -r . -f json -o bandit-report.json
+    - safety check --json
+  artifacts:
+    paths:
+      - bandit-report.json
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+
+# ========================================
+# DEPLOY STAGE
+# ========================================
+
+deploy_staging:
+  stage: deploy
+  image: python:3.11
+  environment:
+    name: staging
+    url: https://staging.example.com
+  dependencies:
+    - install_dependencies
+    - collect_static
+  script:
+    - echo "Deploying to staging server"
+    - apt-get update -qy
+    - apt-get install -y rsync openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan $STAGING_SERVER >> ~/.ssh/known_hosts
+    - rsync -avz --delete . $STAGING_USER@$STAGING_SERVER:/var/www/myapp/
+    - ssh $STAGING_USER@$STAGING_SERVER "cd /var/www/myapp && source venv/bin/activate && pip install -r requirements.txt && python manage.py migrate && sudo systemctl restart gunicorn"
+  only:
+    - develop
+  when: manual
+
+deploy_production:
+  stage: deploy
+  image: python:3.11
+  environment:
+    name: production
+    url: https://example.com
+  dependencies:
+    - install_dependencies
+    - collect_static
+  script:
+    - echo "Deploying to production server"
+    - apt-get update -qy
+    - apt-get install -y rsync openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan $PROD_SERVER >> ~/.ssh/known_hosts
+    - rsync -avz --delete --exclude='.env' . $PROD_USER@$PROD_SERVER:/var/www/myapp/
+    - ssh $PROD_USER@$PROD_SERVER "cd /var/www/myapp && source venv/bin/activate && pip install -r requirements.txt && python manage.py migrate && sudo systemctl restart gunicorn"
+  only:
+    - main
+  when: manual

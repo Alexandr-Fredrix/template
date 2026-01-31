@@ -1,0 +1,44 @@
+# Ansible
+*.retry
+.vault_pass
+ansible.log
+/tmp/
+*.pyc
+
+# Terraform (если добавите в будущем)
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets и чувствительные данные
+*secret*
+*password*
+*.key
+*.pem
+*.crt
+.env
+*.env
+
+# Logs
+*.log
+
+# Временные файлы
+tmp/
+temp/
+*.tmp
+
+# Kubectl config
+kubeconfig
+*.kubeconfig

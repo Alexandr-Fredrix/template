@@ -1,0 +1,89 @@
+# NetworkPolicy для контроля сетевого трафика
+---
+# Разрешить входящий трафик только от frontend подов
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: myapp-allow-frontend
+  namespace: myapp
+spec:
+  podSelector:
+    matchLabels:
+      app: myapp
+      tier: backend
+
+  policyTypes:
+  - Ingress
+  - Egress
+
+  # Входящий трафик
+  ingress:
+  # От frontend подов
+  - from:
+    - podSelector:
+        matchLabels:
+          tier: frontend
+    ports:
+    - protocol: TCP
+      port: 8080
+
+  # От Ingress Controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+
+  # Исходящий трафик
+  egress:
+  # К базе данных
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+
+  # К Redis
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+
+  # DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+
+  # HTTPS к внешним сервисам
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# Deny all по умолчанию (строгая безопасность)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: myapp
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress

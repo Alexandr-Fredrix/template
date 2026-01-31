@@ -1,0 +1,41 @@
+# Dockerfile для Django приложения с Gunicorn
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Устанавливаем системные зависимости
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Создаем пользователя
+RUN useradd -m -u 1000 django && \
+    mkdir -p /app/static /app/media && \
+    chown -R django:django /app
+
+# Копируем и устанавливаем зависимости
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt gunicorn
+
+# Копируем код приложения
+COPY --chown=django:django . .
+
+# Собираем статику
+RUN python manage.py collectstatic --noinput || true
+
+USER django
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DJANGO_SETTINGS_MODULE=project.settings
+
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/')"
+
+# Запуск с Gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "4", "project.wsgi:application"]

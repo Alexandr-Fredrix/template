@@ -1,0 +1,124 @@
+# CronJob для периодических задач
+---
+# Backup задача (каждый день в 2:00 UTC)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: database-backup
+  namespace: myapp
+  labels:
+    app: myapp
+    component: backup
+spec:
+  # Cron расписание (UTC)
+  # * * * * * = минута час день месяц день_недели
+  schedule: "0 2 * * *"
+
+  # Timezone (требует Kubernetes 1.25+)
+  # timeZone: "Europe/Moscow"
+
+  # Количество успешных/неудачных jobs для хранения
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  # Политика конкурентности
+  concurrencyPolicy: Forbid  # Allow, Forbid, Replace
+
+  # Дедлайн для старта (если пропущен)
+  startingDeadlineSeconds: 200
+
+  # Suspend для временной остановки
+  suspend: false
+
+  jobTemplate:
+    metadata:
+      labels:
+        app: myapp
+        component: backup
+    spec:
+      # TTL для автоудаления завершенных jobs
+      ttlSecondsAfterFinished: 86400  # 24 hours
+
+      template:
+        metadata:
+          labels:
+            app: myapp
+            component: backup
+        spec:
+          restartPolicy: OnFailure
+
+          containers:
+          - name: backup
+            image: postgres:15-alpine
+            command:
+            - /bin/sh
+            - -c
+            - |
+              BACKUP_FILE="backup-$(date +%Y%m%d-%H%M%S).sql"
+              pg_dump -h postgres.myapp.svc.cluster.local \
+                      -U $POSTGRES_USER \
+                      -d $POSTGRES_DB \
+                      > /backups/$BACKUP_FILE
+
+              # Загрузка в S3 (опционально)
+              # aws s3 cp /backups/$BACKUP_FILE s3://my-backups/
+
+              # Удаление старых backups (старше 7 дней)
+              find /backups -name "backup-*.sql" -mtime +7 -delete
+
+            env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: myapp-config
+                  key: DATABASE_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: myapp-config
+                  key: DATABASE_NAME
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: myapp-secrets
+                  key: DATABASE_PASSWORD
+
+            volumeMounts:
+            - name: backups
+              mountPath: /backups
+
+          volumes:
+          - name: backups
+            persistentVolumeClaim:
+              claimName: backup-pvc
+
+---
+# Cleanup задача (каждый час)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-temp-files
+  namespace: myapp
+spec:
+  schedule: "0 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: cleanup
+            image: busybox:1.35
+            command:
+            - /bin/sh
+            - -c
+            - find /tmp -type f -mtime +1 -delete
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: tmp
+            hostPath:
+              path: /tmp
