@@ -8,8 +8,12 @@
 - **[Dockerfiles](./dockerfiles/)** - Dockerfiles для разных языков программирования
 - **[Docker Compose](./docker-compose/)** - Примеры docker-compose конфигураций
 - **[GitLab CI/CD](./gitlab-ci/)** - Pipeline конфигурации для GitLab
+  - [README-EXECUTORS.md](./gitlab-ci/README-EXECUTORS.md) - Docker & Kubernetes executors, Kaniko
+  - [config-examples/](./gitlab-ci/config-examples/) - Конфиги для линтеров и тестов
 - **[Kubernetes Manifests](./kubernetes-manifests/)** - Стандартные K8s манифесты
 - **[Ansible](./ansible/)** - Playbooks и roles для автоматизации
+  - [USAGE_GUIDE.md](./ansible/USAGE_GUIDE.md) - Полное руководство по использованию
+  - [EXAMPLES.md](./ansible/EXAMPLES.md) - 12 практических сценариев
 - **[ArgoCD](./argocd/)** - GitOps конфигурации для ArgoCD
 
 ## 🚀 Быстрый старт
